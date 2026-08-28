@@ -42,7 +42,7 @@
 
 int plugin_is_GPL_compatible;
 
-/* ------------------------------------------------------------------ */
+
 /* Index storage                                                       */
 /* ------------------------------------------------------------------ */
 
@@ -173,6 +173,47 @@ fz_index_add (fz_index *ix, const char *data, size_t len)
   ix->offs[ix->count++] = off;
   return 0;
 }
+
+/* Minimal UTF-8 validation: the module API can only hand valid UTF-8
+   to Lisp strings, so paths containing invalid bytes cannot be
+   represented and are skipped instead.  */
+static bool
+fz_utf8_valid (const char *s, size_t len)
+{
+  for (size_t i = 0; i < len;)
+    {
+      unsigned char c = (unsigned char) s[i];
+      if (c < 0x80)
+        {
+          i++;
+          continue;
+        }
+      size_t n;                 /* continuation bytes expected */
+      if ((c & 0xE0) == 0xC0)
+        n = 1;
+      else if ((c & 0xF0) == 0xE0)
+        n = 2;
+      else if ((c & 0xF8) == 0xF0)
+        n = 3;
+      else
+        return false;
+      if (n == 1 && c < 0xC2)   /* overlong */
+        return false;
+      if (n == 3 && c > 0xF4)   /* beyond U+10FFFF */
+        return false;
+      if (i + n >= len)
+        return false;
+      if (n == 2 && c == 0xED
+          && ((unsigned char) s[i + 1] & 0xE0) == 0xA0)
+        return false;           /* UTF-16 surrogate */
+      for (size_t k = 1; k <= n; k++)
+        if (((unsigned char) s[i + k] & 0xC0) != 0x80)
+          return false;
+      i += n + 1;
+    }
+  return true;
+}
+
 
 /* ------------------------------------------------------------------ */
 /* gitignore handling (worker thread only)                             */
@@ -497,7 +538,12 @@ fz_scan (fz_index *ix, const char *dir, const char *rel)
           else if (is_dir)
             rc = fz_scan (ix, full, newrel);
           else if (S_ISREG (st.st_mode))
-            rc = fz_index_add (ix, newrel, strlen (newrel));
+            {
+              /* Skip names that are not valid UTF-8: they cannot be
+                 passed to Lisp strings through the module API.  */
+              if (fz_utf8_valid (newrel, strlen (newrel)))
+                rc = fz_index_add (ix, newrel, strlen (newrel));
+            }
         }
       free (full);
       free (newrel);
@@ -521,7 +567,6 @@ fz_scan (fz_index *ix, const char *dir, const char *rel)
 #define SCORE_LEADING          (-3)
 #define SCORE_LEADING_MAX      3
 #define NO_MATCH               INT_MIN
-
 static bool
 is_separator (char c)
 {
@@ -1497,8 +1542,12 @@ Ffz_index_load (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
         uint32_t pl;
         char buf[FZ_CACHE_MAX_PATH];
         if (fread (&pl, sizeof pl, 1, f) != 1 || pl > FZ_CACHE_MAX_PATH
-            || fread (buf, 1, pl, f) != pl
-            || fz_index_add (ix, buf, pl) != 0)
+            || fread (buf, 1, pl, f) != pl)
+          goto fail_close;
+        /* Skip entries that are not valid UTF-8 (e.g. written by an
+           older version), the same way the scanner skips them.  */
+        if (fz_utf8_valid (buf, pl)
+            && fz_index_add (ix, buf, pl) != 0)
           goto fail_close;
       }
     fclose (f);

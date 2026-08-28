@@ -29,7 +29,9 @@ jobs:
       - name: Run tests
         run: |
           set -e
-          for t in test-m3.el test-m4.el test-open.el test-ui-fix.el test-ui-flow.el; do
+          for t in test-m3.el test-m4.el test-open.el test-ui-fix.el \
+                   test-ui-flow.el test-multiword.el test-persist.el \
+                   test-highlight.el test-completion-table.el test-fuzz.el; do
             echo "== $t"
             emacs -Q --batch -L . -l "$t"
           done
@@ -41,6 +43,30 @@ jobs:
             echo "::error::tag v$tag does not match the Version header in fz-index.el"
             exit 1
           }
+
+  asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: '30.2'
+      - name: Build with ASan+UBSan
+        run: >
+          gcc -O1 -g -fsanitize=address,undefined
+          -fno-omit-frame-pointer -std=c99 -fPIC -shared
+          -o fz-index.so fz-index.c -lpthread
+      - name: Run tests under ASan
+        run: |
+          set -e
+          export LD_PRELOAD="$(gcc -print-file-name=libasan.so) $(gcc -print-file-name=libubsan.so)"
+          export ASAN_OPTIONS=detect_leaks=0
+          for t in test-m3.el test-m4.el test-open.el test-ui-fix.el \
+                   test-ui-flow.el test-multiword.el test-persist.el \
+                   test-highlight.el test-completion-table.el test-fuzz.el; do
+            echo "== $t"
+            emacs -Q --batch -L . -l "$t"
+          done
 
   build:
     strategy:
