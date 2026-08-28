@@ -6,8 +6,8 @@
   (fz-index--record "/proj/src/old-favorite.c")
   (fz-index--record "/proj/src/old-favorite.c")
   (fz-index--record "/proj/src/old-favorite.c")
-  (let* ((cands '(("src/emacs.c" . 87) ("src/old-favorite.c" . 60)
-                  ("src/macros.c" . 70)))
+  (let* ((cands '(("src/emacs.c" 87 nil) ("src/old-favorite.c" 60 nil)
+                  ("src/macros.c" 70 nil)))
          (res (fz-index--apply-frecency cands "/proj/")))
     ;; old-favorite: 60 + min(40, 8*3)=24 -> 84, still below emacs.c(87)
     ;; macros.c stays 70

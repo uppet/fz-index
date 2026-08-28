@@ -4,7 +4,7 @@
 (require 'cl-lib)
 
 ;; fz-index--complete fills the minibuffer with the selected candidate.
-(let* ((fz-index--candidates '(("src/emacs.c" . 87) ("src/macros.c" . 70)))
+(let* ((fz-index--candidates '(("src/emacs.c" 87 nil) ("src/macros.c" 70 nil)))
        (fz-index--selected 1))
   (with-temp-buffer
     (insert "mac")

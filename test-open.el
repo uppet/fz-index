@@ -51,7 +51,7 @@
 ;; fz-index--results-open: RET in the results buffer selects the current
 ;; line's candidate and exits the minibuffer; out-of-range lines
 ;; ("indexing ..."/"no matches"/trailing empty) do nothing.
-(let ((fz-index--candidates '(("a.c" . 10) ("b.c" . 9)))
+(let ((fz-index--candidates '(("a.c" 10 nil) ("b.c" 9 nil)))
       (fz-index--selected 0))
   (cl-letf (((symbol-function 'fz-index--highlight-selection) (lambda () nil)))
     (with-temp-buffer

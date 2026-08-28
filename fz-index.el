@@ -388,14 +388,16 @@ With empty input, the most-opened files of this root are shown."
 
 (defun fz-index--history-candidates (root)
   "Return the open-history entries under ROOT, most opened first.
-The result has the same (RELATIVE-PATH . SCORE) shape as `fz-query'."
+The result has the same (RELATIVE-PATH SCORE POSITIONS) shape as
+`fz-query', with nil POSITIONS (nothing to highlight)."
   (let (out)
     (maphash (lambda (abs count)
                (when (and (string-prefix-p root abs)
                           (file-exists-p abs))
-                 (push (cons (substring abs (length root)) count) out)))
+                 (push (list (substring abs (length root)) count nil)
+                       out)))
              fz-index--history)
-    (seq-take (sort out (lambda (a b) (> (cdr a) (cdr b))))
+    (seq-take (sort out (lambda (a b) (> (cadr a) (cadr b))))
               fz-index-query-limit)))
 
 (defun fz-index--complete ()
@@ -439,6 +441,10 @@ minibuffer exits.  Lines without a candidate do nothing."
   (when-let* ((win (active-minibuffer-window)))
     (select-window win)))
 
+(defface fz-index-match
+  '((t :inherit completions-common-part))
+  "Face used for the matched characters in the results buffer.")
+
 (defun fz-index--render ()
   "Render `fz-index--candidates' into the results buffer."
   (let ((buf (get-buffer fz-index-results-buffer-name)))
@@ -453,7 +459,18 @@ minibuffer exits.  Lines without a candidate do nothing."
             (insert (propertize "  no matches" 'face 'shadow)))
            (t
             (dolist (cand fz-index--candidates)
-              (insert "  " (car cand) "\n")))))
+              (let ((line-start (point)))
+                (insert "  " (car cand) "\n")
+                ;; CANDIDATE positions are byte offsets into the
+                ;; path; convert to buffer characters (the two leading
+                ;; spaces are ASCII, so 2 extra bytes).
+                (let ((line-start-bytes (position-bytes line-start)))
+                  (dolist (p (caddr cand))
+                    (let ((cp (byte-to-position
+                               (+ line-start-bytes 2 p))))
+                      (when cp
+                        (put-text-property
+                         cp (1+ cp) 'face 'fz-index-match))))))))))
         (fz-index--highlight-selection)))))
 
 (defun fz-index--ready-p ()
@@ -497,17 +514,18 @@ and scroll the results window so the selection stays visible."
   (puthash abs (1+ (gethash abs fz-index--history 0)) fz-index--history))
 
 (defun fz-index--apply-frecency (candidates root)
-  "Re-sort CANDIDATES ((REL . SCORE) ...) with the open-history bonus."
+  "Re-sort CANDIDATES ((REL SCORE POSITIONS) ...) with the history bonus."
   (let ((boosted
          (mapcar (lambda (c)
-                   (cons (car c)
-                         (+ (cdr c)
+                   (list (car c)
+                         (+ (cadr c)
                             (min fz-index-frecency-max-boost
                                  (* fz-index-frecency-boost
                                     (gethash (expand-file-name (car c) root)
-                                             fz-index--history 0))))))
+                                             fz-index--history 0))))
+                         (caddr c)))
                  candidates)))
-    (sort boosted (lambda (a b) (> (cdr a) (cdr b))))))
+    (sort boosted (lambda (a b) (> (cadr a) (cadr b))))))
 
 (defun fz-index--history-save ()
   "Persist the open history to `fz-index-history-file'."

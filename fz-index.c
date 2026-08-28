@@ -398,7 +398,9 @@ fz_scan (fz_index *ix, const char *dir, const char *rel)
 {
   DIR *d = opendir (dir);
   if (!d)
-    return 0;              /* unreadable directory: skip silently */
+    /* An unreadable subdirectory is skipped silently, but an
+       unreadable root is a build failure.  */
+    return rel[0] == '\0' ? -1 : 0;
 
   /* Push this directory's gitignore rules onto the stack.  At the root,
      .git/info/exclude is honored as well.  */
@@ -546,26 +548,6 @@ fz_memrchr (const char *s, int c, size_t n)
 #endif
 }
 
-/* Greedy leftmost subsequence match: fill POS with the match positions
-   of PAT in HAY (LEN bytes).  Return 0 on match, -1 otherwise.  */
-static int
-fz_match_forward (const char *pat, size_t plen, const char *hay,
-                  size_t len, size_t *pos)
-{
-  size_t off = 0;
-  for (size_t k = 0; k < plen; k++)
-    {
-      if (len - off < plen - k)
-        return -1;              /* remaining bytes cannot fit pattern */
-      const char *p = memchr (hay + off, pat[k], len - off);
-      if (!p)
-        return -1;
-      pos[k] = (size_t) (p - hay);
-      off = pos[k] + 1;
-    }
-  return 0;
-}
-
 /* Greedy rightmost subsequence match: fill POS with the match positions
    of PAT in HAY, anchoring the pattern as far right as possible.  This
    aligns the pattern with the file name at the end of the path, which
@@ -588,45 +570,36 @@ fz_match_backward (const char *pat, size_t plen, const char *hay,
   return 0;
 }
 
-/* Score an alignment POS of PLEN matched positions against the path STR
-   (LEN bytes).  BASENAME is the offset just past the last '/'.  The
-   scoring model is the one reverse-engineered from Sublime Text, plus
-   a per-byte bonus for matches that land in the file name itself.  */
+/* Per-position match bonus: separator, camelCase and basename
+   bonuses for a match landing at offset I of STR.  */
 static int
-fz_score_positions (const size_t *pos, size_t plen, const char *str,
-                    size_t len, size_t basename)
+fz_pos_bonus (const char *str, size_t i, size_t basename)
 {
-  int score = -(int) (len - plen);
-  size_t lead = pos[0] < SCORE_LEADING_MAX ? pos[0] : SCORE_LEADING_MAX;
-  score += SCORE_LEADING * (int) lead;
-  for (size_t k = 0; k < plen; k++)
-    {
-      size_t i = pos[k];
-      if (k > 0 && i == pos[k - 1] + 1)
-        score += SCORE_CONSECUTIVE;
-      if (i >= basename)
-        score += SCORE_BASENAME;
-      if (i > 0 && is_separator (str[i - 1]))
-        score += SCORE_SEPARATOR;
-      if (i > 0 && islower ((unsigned char) str[i - 1])
-          && isupper ((unsigned char) str[i]))
-        score += SCORE_CAMEL;
-    }
-  return score;
+  int b = 0;
+  if (i >= basename)
+    b += SCORE_BASENAME;
+  if (i > 0 && is_separator (str[i - 1]))
+    b += SCORE_SEPARATOR;
+  if (i > 0 && islower ((unsigned char) str[i - 1])
+      && isupper ((unsigned char) str[i]))
+    b += SCORE_CAMEL;
+  return b;
 }
 
-/* Fuzzy-match PAT (PLEN bytes, already lowercased when CASE_INSENS)
-   against the path STR (original bytes) / LOWER (lowercased copy), both
-   LEN bytes long.  Match positions are located with memchr/memrchr,
-   which are SIMD-optimized, instead of a byte-by-byte scan.  Both the
-   leftmost and the rightmost alignment are scored and the better one
-   wins: the leftmost favors matches anchored at the start of the path
-   (directory queries), the rightmost favors matches anchored in the
-   file name.  Returns the score, or NO_MATCH when PAT is not a
-   subsequence of the path.  */
+#define FZ_NEG (INT_MIN / 2)
+
+/* Optimal-alignment fuzzy score via a Smith-Waterman-style DP,
+   equivalent to exhaustively scoring every subsequence alignment of
+   PAT in STR under the Sublime scoring model (which is what Sublime
+   itself does), instead of scoring only the leftmost/rightmost
+   greedy alignments.  D[j] is the best bonus of an alignment where
+   PAT[j] matches the current STR[I]; M[j] the best bonus aligning
+   PAT[0..J] within STR[0..I].  Both arrays roll over DP rows, so no
+   allocation happens per candidate.  Returns NO_MATCH when PAT is
+   not a subsequence of the path.  */
 static int
-fz_score (const char *pat, size_t plen, const char *str,
-          const char *lower, size_t len, bool case_insens)
+fz_score_dp (const char *pat, size_t plen, const char *str,
+             const char *lower, size_t len, bool case_insens)
 {
   if (plen == 0)
     return -(int) len;
@@ -634,20 +607,158 @@ fz_score (const char *pat, size_t plen, const char *str,
     return NO_MATCH;
 
   const char *hay = case_insens ? lower : str;
+  /* Cheap memchr prefilter: reject non-subsequences at SIMD speed.  */
+  {
+    size_t off = 0;
+    for (size_t k = 0; k < plen; k++)
+      {
+        const char *p = memchr (hay + off, pat[k], len - off);
+        if (!p)
+          return NO_MATCH;
+        off = (size_t) (p - hay) + 1;
+      }
+  }
+
   const char *slash = fz_memrchr (str, '/', len);
   size_t basename = slash ? (size_t) (slash - str) + 1 : 0;
 
-  size_t pos[FZ_MAX_PATTERN];
-  int best = NO_MATCH;
-  if (fz_match_forward (pat, plen, hay, len, pos) == 0)
-    best = fz_score_positions (pos, plen, str, len, basename);
-  if (fz_match_backward (pat, plen, hay, len, pos) == 0)
+  int D[FZ_MAX_PATTERN], M[FZ_MAX_PATTERN];
+  for (size_t j = 0; j < plen; j++)
+    D[j] = M[j] = FZ_NEG;
+  for (size_t i = 0; i < len; i++)
     {
-      int s = fz_score_positions (pos, plen, str, len, basename);
-      if (best == NO_MATCH || s > best)
-        best = s;
+      char c = hay[i];
+      int posb = fz_pos_bonus (str, i, basename);
+      /* Descending J, so D[J-1]/M[J-1] still belong to row I-1.  */
+      size_t jmax = i < plen - 1 ? i : plen - 1;
+      for (size_t j = jmax + 1; j-- > 0;)
+        {
+          if (c != pat[j])
+            {
+              D[j] = FZ_NEG;
+              continue;
+            }
+          int cand;
+          if (j == 0)
+            cand = SCORE_LEADING * (int) (i < (size_t) SCORE_LEADING_MAX
+                                          ? i : (size_t) SCORE_LEADING_MAX);
+          else
+            cand = M[j - 1];
+          cand += posb;
+          if (j > 0 && D[j - 1] != FZ_NEG)
+            {
+              int consec = D[j - 1] + SCORE_CONSECUTIVE + posb;
+              if (consec > cand)
+                cand = consec;
+            }
+          D[j] = cand;
+          if (cand > M[j])
+            M[j] = cand;
+        }
     }
-  return best;
+  if (M[plen - 1] == FZ_NEG)
+    return NO_MATCH;
+  return M[plen - 1] - (int) (len - plen);
+}
+
+/* Full-matrix DP variant that also reports the matched byte
+   positions in OUT_POS (PLEN entries), for highlighting the top
+   candidates.  Falls back to the rolled DP plus the rightmost greedy
+   alignment when the matrix would exceed FZ_POS_MAX_CELLS.  */
+#define FZ_POS_MAX_CELLS (1u << 20)
+
+static int
+fz_score_dp_pos (const char *pat, size_t plen, const char *str,
+                 const char *lower, size_t len, bool case_insens,
+                 size_t *out_pos)
+{
+  const char *hay = case_insens ? lower : str;
+  if (plen == 0 || plen > len || plen > FZ_MAX_PATTERN
+      || (size_t) len * plen > FZ_POS_MAX_CELLS)
+    {
+      int s = fz_score_dp (pat, plen, str, lower, len, case_insens);
+      if (s != NO_MATCH && plen > 0)
+        fz_match_backward (pat, plen, hay, len, out_pos);
+      return s;
+    }
+
+  const char *slash = fz_memrchr (str, '/', len);
+  size_t basename = slash ? (size_t) (slash - str) + 1 : 0;
+
+  int *Dm = malloc ((size_t) len * plen * sizeof *Dm);
+  int *Mm = malloc ((size_t) len * plen * sizeof *Mm);
+  if (!Dm || !Mm)
+    {
+      free (Dm);
+      free (Mm);
+      int s = fz_score_dp (pat, plen, str, lower, len, case_insens);
+      if (s != NO_MATCH)
+        fz_match_backward (pat, plen, hay, len, out_pos);
+      return s;
+    }
+  for (size_t i = 0; i < len; i++)
+    {
+      char c = hay[i];
+      int posb = fz_pos_bonus (str, i, basename);
+      size_t jmax = i < plen - 1 ? i : plen - 1;
+      for (size_t j = jmax + 1; j-- > 0;)
+        {
+          int Mprev_j = i > 0 ? Mm[(i - 1) * plen + j] : FZ_NEG;
+          int Mprev_jm1
+              = (i > 0 && j > 0) ? Mm[(i - 1) * plen + j - 1] : FZ_NEG;
+          int Dprev_jm1
+              = (i > 0 && j > 0) ? Dm[(i - 1) * plen + j - 1] : FZ_NEG;
+          if (c != pat[j])
+            {
+              Dm[i * plen + j] = FZ_NEG;
+              Mm[i * plen + j] = Mprev_j;
+              continue;
+            }
+          int cand;
+          if (j == 0)
+            cand = SCORE_LEADING * (int) (i < (size_t) SCORE_LEADING_MAX
+                                          ? i : (size_t) SCORE_LEADING_MAX);
+          else
+            cand = Mprev_jm1;
+          cand += posb;
+          if (j > 0 && Dprev_jm1 != FZ_NEG)
+            {
+              int consec = Dprev_jm1 + SCORE_CONSECUTIVE + posb;
+              if (consec > cand)
+                cand = consec;
+            }
+          Dm[i * plen + j] = cand;
+          Mm[i * plen + j] = cand > Mprev_j ? cand : Mprev_j;
+        }
+      for (size_t j = jmax + 1; j < plen; j++)
+        {
+          Dm[i * plen + j] = FZ_NEG;
+          Mm[i * plen + j] = i > 0 ? Mm[(i - 1) * plen + j] : FZ_NEG;
+        }
+    }
+  int best = Mm[(len - 1) * plen + plen - 1];
+  /* Trace the optimal alignment back: positions where M == D are the
+     ones the pattern actually consumes.  */
+  size_t i = len - 1;
+  for (size_t j = plen; j-- > 0;)
+    {
+      while (Mm[i * plen + j] != Dm[i * plen + j])
+        {
+          if (i == 0)
+            goto traced;    /* cannot happen after the prefilter */
+          i--;
+        }
+      out_pos[j] = i;
+      if (j == 0)
+        break;
+      if (i == 0)
+        goto traced;
+      i--;
+    }
+traced:
+  free (Dm);
+  free (Mm);
+  return best == FZ_NEG ? NO_MATCH : best - (int) (len - plen);
 }
 
 /* Score STR against every one of the NWORDS query words: all of them
@@ -664,7 +775,8 @@ fz_score_multi (const char **words, const size_t *wlens, size_t nwords,
   int total = 0;
   for (size_t w = 0; w < nwords; w++)
     {
-      int s = fz_score (words[w], wlens[w], str, lower, len, case_insens);
+      int s = fz_score_dp (words[w], wlens[w], str, lower, len,
+                           case_insens);
       if (s == NO_MATCH)
         return NO_MATCH;
       total += s;
@@ -1210,16 +1322,35 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
 
   emacs_value result = env->intern (env, "nil");
   emacs_value Qcons = env->intern (env, "cons");
+  emacs_value Qlist = env->intern (env, "list");
   for (size_t i = nhits; i-- > 0;)
     {
-      const char *path = ix->paths + ix->offs[heap[i].idx];
+      uint32_t off = ix->offs[heap[i].idx];
+      const char *path = ix->paths + off;
+      size_t pathlen = ix->lens[heap[i].idx];
       emacs_value epath
-          = env->make_string (env, path, (ptrdiff_t) strlen (path));
+          = env->make_string (env, path, (ptrdiff_t) pathlen);
       emacs_value escore = env->make_integer (env, heap[i].score);
-      emacs_value pair = env->funcall (env, Qcons, 2,
-                                       (emacs_value[]) { epath, escore });
+      /* Matched byte positions of every query word, for highlighting;
+         collected per word with the full-matrix DP.  */
+      emacs_value positions = env->intern (env, "nil");
+      size_t posbuf[FZ_MAX_PATTERN];
+      for (size_t w = nwords; w-- > 0;)
+        if (fz_score_dp_pos (words[w], wlens[w], path, ix->lower + off,
+                             pathlen, case_insens, posbuf)
+            != NO_MATCH)
+          for (size_t k = wlens[w]; k-- > 0;)
+            positions
+                = env->funcall (env, Qcons, 2,
+                                (emacs_value[]) {
+                                  env->make_integer (env,
+                                                     (intmax_t) posbuf[k]),
+                                  positions });
+      emacs_value triple = env->funcall (env, Qlist, 3,
+                                         (emacs_value[]) {
+                                           epath, escore, positions });
       result = env->funcall (env, Qcons, 2,
-                             (emacs_value[]) { pair, result });
+                             (emacs_value[]) { triple, result });
     }
 
   free (heap);
