@@ -71,6 +71,50 @@
                style (all-completions "emc" table)))))
   (princ "style compatibility tests passed\n"))
 
+;; History and frecency: empty input lists the open history and
+;; recorded opens boost query results -- the same candidates
+;; `fz-index--update' shows in the main UI.  Point the history file
+;; at a temp path so the kill-emacs save hook does not touch the
+;; real one.
+(setq fz-index-history-file "/tmp/fz-ct-uem3/history.el")
+(clrhash fz-index--indexes)
+(clrhash fz-index--history)
+(let ((user-emacs-directory "/tmp/fz-ct-uem3/")
+      (table (fz-index-completion-table "/tmp/fz-ct/"))
+      (deadline (+ (float-time) 30)))
+  (make-directory user-emacs-directory t)
+  (funcall table "x" nil 'all-completions)
+  (while (and (not (let ((h (gethash "/tmp/fz-ct/" fz-index--indexes)))
+                     (and h (fz-index-ready-p h))))
+              (< (float-time) deadline))
+    (accept-process-output nil 0.05))
+  ;; Empty input, empty history: no candidates.
+  (when (funcall table "" nil 'all-completions)
+    (error "BUG: empty input with empty history => %S"
+           (funcall table "" nil 'all-completions)))
+  ;; Record an open; empty input now lists it.
+  (fz-index--record "/tmp/fz-ct/src/main.c")
+  (unless (equal (funcall table "" nil 'all-completions) '("src/main.c"))
+    (error "BUG: empty input with history => %S"
+           (funcall table "" nil 'all-completions)))
+  ;; Both files match "m"; with a large boost the recorded one wins.
+  (unless (= (length (funcall table "m" nil 'all-completions)) 2)
+    (error "BUG: query m => %S" (funcall table "m" nil 'all-completions)))
+  (let ((fz-index-frecency-max-boost 10000))
+    (unless (equal (car (funcall table "m" nil 'all-completions))
+                   "src/main.c")
+      (error "BUG: frecency boost did not reorder => %S"
+             (funcall table "m" nil 'all-completions))))
+  ;; fz-index-read-file records the chosen file in the history.
+  (cl-letf (((symbol-function 'completing-read)
+             (lambda (&rest _) "src/emacs.c"))
+            ((symbol-function 'find-file) (lambda (&rest _) nil)))
+    (let ((default-directory "/tmp/fz-ct/"))
+      (fz-index-read-file "x: ")))
+  (unless (fz-index--history-entry "/tmp/fz-ct/src/emacs.c")
+    (error "BUG: fz-index-read-file did not record the open"))
+  (princ "history/frecency tests passed\n"))
+
 (let ((h (gethash "/tmp/fz-ct/" fz-index--indexes)))
   (when h (fz-index-destroy h)))
 (clrhash fz-index--indexes)
@@ -78,6 +122,7 @@
 (delete-file "/tmp/fz-ct/src/main.c")
 (delete-directory "/tmp/fz-ct/src")
 (delete-directory "/tmp/fz-ct")
-(delete-directory "/tmp/fz-ct-uem" t
-(delete-directory "/tmp/fz-ct-uem2" t))
+(delete-directory "/tmp/fz-ct-uem" t)
+(delete-directory "/tmp/fz-ct-uem2" t)
+(delete-directory "/tmp/fz-ct-uem3" t)
 (princ "completion-table tests done\n")

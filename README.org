@@ -50,6 +50,12 @@ use, =fz-index-ensure-module= installs it automatically
 2. Failing that, the bundled =fz-index.c= is compiled with a local
    gcc/clang (needs only =emacs-module.h= and a C99 compiler).
 
+The checksum file is fetched from the same GitHub release as the
+binary, so this protects the download against corruption (truncated
+or re-encoded bytes) but is not a defense against a compromised
+release.  If that is a concern, set =fz-index-module-auto-install=
+to nil and build the module yourself with =make=.
+
 Run =M-x fz-index-ensure-module= to install ahead of time, or build
 by hand with =make= (=make fz-index.dll= cross-compiles for Windows
 with =gcc-mingw-w64-x86-64=; the same source also builds natively
@@ -82,11 +88,16 @@ under MSYS2).
   debounced by =fz-index-preview-delay= so rapid navigation stays
   free; =C-l= toggles preview (files larger than
   =fz-index-preview-max-size= are skipped)
+- Re-querying on minibuffer input is debounced by
+  =fz-index-query-delay= (default 0.01s), so fast typing does not
+  launch a query per keystroke; confirming always applies any
+  pending update first
 - Opened files get a frecency bonus on later queries: log2-compressed
   open counts with a half-life decay on the last-open time
   (=fz-index-frecency-half-life=, default 7 days), so stale favorites
   gradually lose their lead; history persists in
-  =fz-index-history-file=
+  =fz-index-history-file=, and =fz-index-read-file= (the
+  completing-read entry point) feeds the same history
 - =M-p= / =M-n= browse your previous queries (minibuffer history)
 - =M-x fz-index-reset= — drop the cached index (rebuilt on next
   query) and clear the base set by =fz-index-open-set-base=

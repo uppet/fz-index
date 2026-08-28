@@ -50,8 +50,8 @@ make                 # produces fz-index.so (or .dylib on macOS)
 emacs -Q --batch --eval '(byte-compile-file "fz-index.el")'
 emacs -Q --batch -L . -l fz-index-tests.el -f ert-run-tests-batch-and-exit
 for t in test-m3.el test-m4.el test-open.el test-ui-fix.el test-ui-flow.el \
-         test-multiword.el test-persist.el test-highlight.el \
-         test-completion-table.el test-fuzz.el; do
+         test-multiword.el test-persist.el test-refresh.el test-highlight.el \
+         test-completion-table.el test-module-install.el test-fuzz.el; do
   emacs -Q --batch -L . -l "$t" || exit 1
 done
 ```

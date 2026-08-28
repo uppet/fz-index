@@ -79,6 +79,14 @@ available.  When nil, a missing module just raises an error."
   "Maximum number of candidates requested per query."
   :type 'integer)
 
+(defcustom fz-index-query-delay 0.01
+  "Seconds of idle time before minibuffer input is re-queried.
+Fast typing is coalesced into one query, so a slow first query on a
+large index does not block the minibuffer between keystrokes.  The
+initial update when the minibuffer opens always runs immediately,
+and confirming (RET/M-RET) flushes any pending update first."
+  :type 'number)
+
 (defcustom fz-index-results-buffer-name " *fz-index-results*"
   "Name of the buffer used to display query results."
   :type 'string)
@@ -147,9 +155,13 @@ or `insert-path'.")
 (defvar fz-index--preview-timer nil
   "Idle timer for the debounced preview, or nil.")
 
+(defvar fz-index--update-timer nil
+  "Idle timer for the debounced re-query, or nil.")
+
 (defun fz-index--insert-path-action ()
   "Exit the minibuffer, requesting insertion of the path at point."
   (interactive)
+  (fz-index--flush-update)
   (setq fz-index--action 'insert-path)
   (exit-minibuffer))
 
@@ -160,6 +172,7 @@ Recording the choice in `fz-index--action' here (inside the command,
 where `current-prefix-arg' is still live) keeps it reliable after
 `read-from-minibuffer' has returned."
   (interactive)
+  (fz-index--flush-update)
   (setq fz-index--action
         (if current-prefix-arg 'open-other-window 'open))
   (exit-minibuffer))
@@ -361,6 +374,7 @@ Rebuild happens on the next `fz-index-open-file'."
          (fz-index--origin-buffer (current-buffer))
          (fz-index--preview-buffers nil)
          (fz-index--preview-timer nil)
+         (fz-index--update-timer nil)
          (opened nil)
          (results-buf (get-buffer-create fz-index-results-buffer-name))
          (keymap (make-sparse-keymap)))
@@ -385,7 +399,7 @@ Rebuild happens on the next `fz-index-open-file'."
     (unwind-protect
         (minibuffer-with-setup-hook
             (lambda ()
-              (add-hook 'post-command-hook #'fz-index--update nil t)
+              (add-hook 'post-command-hook #'fz-index--schedule-update nil t)
               (fz-index--update))
           (fz-index--show-results-window results-buf)
           (when-let* ((choice (read-from-minibuffer
@@ -398,8 +412,11 @@ Rebuild happens on the next `fz-index-open-file'."
                      (abs (expand-file-name rel root)))
                 (pcase fz-index--action
                   ('insert-path
-                   (with-current-buffer origin-buffer
-                     (insert rel)))
+                   ;; The origin buffer may have been killed while the
+                   ;; minibuffer was open.
+                   (when (buffer-live-p origin-buffer)
+                     (with-current-buffer origin-buffer
+                       (insert rel))))
                   ('open-other-window
                    (fz-index--record abs)
                    (find-file-other-window abs)
@@ -419,12 +436,18 @@ Rebuild happens on the next `fz-index-open-file'."
       (unless opened
         (when (window-live-p fz-index--origin-window)
           (set-window-buffer fz-index--origin-window fz-index--origin-buffer)))
+      (when (timerp fz-index--update-timer)
+        (cancel-timer fz-index--update-timer))
       (when (timerp fz-index--preview-timer)
         (cancel-timer fz-index--preview-timer))
       (dolist (buf fz-index--preview-buffers)
         (when (buffer-live-p buf)
           (kill-buffer buf)))
-      (delete-window (get-buffer-window results-buf))
+      ;; The results window may be gone (user deleted it, or switched
+      ;; frames): `delete-window' on nil would delete the selected
+      ;; window instead.
+      (when-let* ((win (get-buffer-window results-buf)))
+        (delete-window win))
       (kill-buffer results-buf))))
 
 (defun fz-index--next ()
@@ -459,6 +482,30 @@ With empty input, the most-opened files of this root are shown."
                fz-index--root))
             fz-index--selected 0)
       (fz-index--render))))
+
+(defun fz-index--schedule-update ()
+  "Schedule `fz-index--update' after `fz-index-query-delay' idle time.
+Runs from `post-command-hook', i.e. on every keystroke; coalescing
+fast typing into one query keeps a slow query on a large index from
+blocking the minibuffer.  The timer fires while
+`read-from-minibuffer' waits, so the session's dynamic bindings are
+still in scope, like the preview timer."
+  (when (timerp fz-index--update-timer)
+    (cancel-timer fz-index--update-timer))
+  (setq fz-index--update-timer
+        (run-with-idle-timer fz-index-query-delay nil
+                             #'fz-index--update)))
+
+(defun fz-index--flush-update ()
+  "Run any pending debounced update now.
+Called by the confirming commands (RET, M-RET) so they act on
+candidates matching the latest input, not a stale list.  Not called
+by the results-buffer commands: those act on the line the user sees,
+so the displayed (stale) candidate list is the right one there."
+  (when (timerp fz-index--update-timer)
+    (cancel-timer fz-index--update-timer)
+    (setq fz-index--update-timer nil))
+  (fz-index--update))
 
 (defun fz-index--history-candidates (root)
   "Return the open-history entries under ROOT, best frecency first.
@@ -728,8 +775,14 @@ session ends (except one the user actually opened)."
         (let ((buf (or (get-file-buffer abs)
                        ;; Not raw: a raw (literal) buffer would
                        ;; conflict with a later plain `find-file'.
-                       (let ((b (ignore-errors
-                                  (find-file-noselect abs))))
+                       ;; Mode hooks still run, but binding the
+                       ;; enable-local-variables switches nil keeps a
+                       ;; risky file/dir-local-variables prompt from
+                       ;; popping up inside this idle timer.
+                       (let ((b (let (enable-local-variables
+                                      enable-dir-local-variables)
+                                  (ignore-errors
+                                    (find-file-noselect abs)))))
                          (when b
                            (push b fz-index--preview-buffers)
                            b)))))
@@ -785,10 +838,17 @@ again.  While the index is still building, the table is empty."
      ((eq action 'lambda)
       nil)
      ((or (eq action t) (eq action 'all-completions))
+      ;; The same candidates `fz-index--update' would show: the open
+      ;; history for empty input, frecency-boosted results otherwise.
+      ;; display-sort-function is identity, so this order stands.
       (let ((handle (fz-index--index-for root)))
-        (if (fz-index-ready-p handle)
-            (mapcar #'car (fz-query handle string fz-index-query-limit))
-          nil)))
+        (if (not (fz-index-ready-p handle))
+            nil
+          (if (string-empty-p string)
+              (mapcar #'car (fz-index--history-candidates root))
+            (mapcar #'car (fz-index--apply-frecency
+                           (fz-query handle string fz-index-query-limit)
+                           root))))))
      ((null action)
       ;; try-completion: the input is never expanded.
       string)
@@ -810,7 +870,11 @@ The base directory is the same one `fz-index-open-file' would use."
                (fz-index-completion-table root)
                nil nil nil 'fz-index--query-history)))
     (when (and rel (not (string-empty-p rel)))
-      (find-file (expand-file-name rel root)))))
+      (let ((abs (expand-file-name rel root)))
+        ;; Feed the same frecency history the main UI feeds, so the
+        ;; two entry points learn from each other.
+        (fz-index--record abs)
+        (find-file abs)))))
 
 ;;; Module loading
 
@@ -825,12 +889,19 @@ The base directory is the same one `fz-index-open-file' would use."
   "Return the release-asset platform tag for this system, or nil.
 The tags match the assets published on the project's GitHub
 Releases page."
-  (let ((arch (if (string-match-p "aarch64\\|arm64" system-configuration)
-                  "aarch64" "x86_64")))
+  (let ((arch (cond
+               ((string-match-p "aarch64\\|arm64" system-configuration)
+                "aarch64")
+               ((string-match-p "x86_64\\|amd64" system-configuration)
+                "x86_64")
+               ;; Anything else (32-bit, ARM64 Windows, riscv, ...):
+               ;; no prebuilt asset, go straight to compiling.
+               (t nil))))
     (pcase system-type
-      ('gnu/linux (format "%s-linux-gnu" arch))
-      ('windows-nt "x86_64-windows")
-      ('darwin (format "%s-macos" arch))
+      ('gnu/linux (and arch (format "%s-linux-gnu" arch)))
+      ;; Only x86_64 Windows has a prebuilt asset.
+      ('windows-nt (and (equal arch "x86_64") "x86_64-windows"))
+      ('darwin (and arch (format "%s-macos" arch)))
       (_ nil))))
 
 (defun fz-index--fetch (url)
@@ -910,6 +981,25 @@ Returns non-nil on success."
           (message "fz-index: module compiled")
           t)))))
 
+(defun fz-index--load-module-file (file)
+  "Load module FILE; on failure return nil.
+A stale or wrong-architecture binary stays on disk and would
+otherwise fail on every call, so when `fz-index-module-auto-install'
+is non-nil a file that fails to load is deleted, letting the install
+path in `fz-index-ensure-module' replace it.  When auto-install is
+off the file is left alone: it may be the user's own build."
+  (condition-case err
+      (progn (module-load file) t)
+    (error
+     (if fz-index-module-auto-install
+         (progn
+           (message "fz-index: loading %s failed (%s); deleting the file"
+                    file (error-message-string err))
+           (ignore-errors (delete-file file)))
+       (message "fz-index: loading %s failed (%s)"
+                file (error-message-string err)))
+     nil)))
+
 ;;;###autoload
 (defun fz-index-ensure-module ()
   "Load the fz-index dynamic module, installing it when missing.
@@ -917,9 +1007,12 @@ When the module file is absent and `fz-index-module-auto-install'
 is non-nil, a prebuilt binary matching this platform is downloaded
 from the project's GitHub Releases (verified against its published
 SHA-256 checksum); failing that, the bundled C source is compiled
-when a C compiler is available.  Called automatically by
-`fz-index-open-file'; run it interactively to install the module ahead
-of time."
+when a C compiler is available.  A module file that exists but
+fails to load (a stale or wrong-architecture binary) is deleted and
+reinstalled the same way; with `fz-index-module-auto-install' nil it
+is left in place and an error is raised instead.  Called
+automatically by `fz-index-open-file'; run it interactively to
+install the module ahead of time."
   (interactive)
   (cond
    ((fboundp 'fz-index-build)
@@ -929,16 +1022,25 @@ of time."
    (t
     (let ((file (fz-index--module-file)))
       (cond
-       ((file-exists-p file)
-        (module-load file))
+       ;; A module already on disk: load it.  If it fails to load (a
+       ;; stale or wrong-architecture binary passes the checksum just
+       ;; fine), `fz-index--load-module-file' deletes it when
+       ;; auto-install is on, so the install path below gets a clean
+       ;; shot; otherwise the user-error below fires.
+       ((and (file-exists-p file) (fz-index--load-module-file file))
+        t)
        ((not fz-index-module-auto-install)
-        (user-error "fz-index module not found at %s" file))
-       ((or (fz-index--download-module file)
-            (fz-index--build-module file))
-        (module-load file))
+        (user-error "fz-index module missing or unloadable at %s" file))
        (t
-        (user-error "fz-index: no prebuilt module for this platform \
-and no usable C compiler; see https://github.com/uppet/fz-index")))))))
+        ;; Download the prebuilt binary or compile the bundled source;
+        ;; if either produces a module that still fails to load, the
+        ;; file is deleted and the other source is tried.
+        (or (and (fz-index--download-module file)
+                 (fz-index--load-module-file file))
+            (and (fz-index--build-module file)
+                 (fz-index--load-module-file file))
+            (user-error "fz-index: no prebuilt module for this platform \
+and no usable C compiler; see https://github.com/uppet/fz-index"))))))))
 
 (provide 'fz-index)
 ;;; fz-index.el ends here

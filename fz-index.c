@@ -1674,7 +1674,8 @@ Ffz_index_destroy (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 /* On-disk cache                                                       */
 /* ------------------------------------------------------------------ */
 
-/* Cache file format, bytewise little-endian:
+/* Cache file format (multi-byte integers in native byte order;
+   all supported platforms are little-endian):
      8 bytes  magic FZ_CACHE_MAGIC
      u32      entry count
      u32      root byte length, then the root bytes (informational)
