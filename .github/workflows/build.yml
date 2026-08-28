@@ -49,9 +49,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: purcell/setup-emacs@master
-        with:
-          version: '30.2'
+      - name: Install system Emacs
+        # The nix-based setup-emacs Emacs cannot use the system
+        # libasan (its loader does not search system paths); the apt
+        # Emacs shares the toolchain with the sanitizer runtime.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq emacs-nox
       - name: Build with ASan+UBSan
         run: >
           gcc -O1 -g -fsanitize=address,undefined
