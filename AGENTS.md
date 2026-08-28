@@ -93,6 +93,11 @@ maintainer uses a locally built Emacs at `../build-31.1/src/emacs`.
 - Tests that drive `fz-index-open-file` must bind
   `user-emacs-directory` to a temp dir, otherwise the on-disk index
   cache leaks into the real `~/.emacs.d/fz-index/`.
+- Interactive Emacs ignores SIGPIPE but BATCH Emacs does not: a
+  worker thread writing to a pipe whose Lisp process was deleted
+  mid-scan kills batch Emacs with SIGPIPE.  The build worker blocks
+  SIGPIPE itself (`pthread_sigmask`); never remove that, and be
+  suspicious of any background-thread I/O in tests.
 - Module file suffix comes from `module-file-suffix` at runtime
   (.so / .dylib / .dll); never hard-code it.
 - The results buffer is read-only and line-indexed: candidate N is

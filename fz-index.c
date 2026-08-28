@@ -27,6 +27,7 @@
 #include <dirent.h>
 #include <limits.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1019,6 +1020,16 @@ wrap_index (emacs_env *env, fz_index *ix)
 static void *
 fz_build_worker (void *arg)
 {
+#ifndef _WIN32
+  /* The pipe may already be closed on our side (e.g. the Lisp process
+     was deleted mid-scan).  Interactive Emacs ignores SIGPIPE, but
+     batch Emacs does not, and a module must not kill its host:
+     block it here and let write(2) fail with EPIPE instead.  */
+  sigset_t set;
+  sigemptyset (&set);
+  sigaddset (&set, SIGPIPE);
+  pthread_sigmask (SIG_BLOCK, &set, NULL);
+#endif
   fz_index *ix = arg;
   int rc = fz_scan (ix, ix->root, "");
   atomic_store (&ix->state, rc == 0 ? FZ_READY : FZ_FAILED);

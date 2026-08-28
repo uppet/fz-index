@@ -5,7 +5,7 @@
 ;; Author: Joyer Huang <collger@gmail.com>
 ;; Assisted-by: Kimi Code CLI
 ;; Maintainer: Joyer Huang <collger@gmail.com>
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: files, matching, convenience
 ;; URL: https://github.com/uppet/fz-index
@@ -57,7 +57,7 @@
   "Fast fuzzy file open backed by a native index."
   :group 'convenience)
 
-(defconst fz-index-version "0.2.0"
+(defconst fz-index-version "0.3.0"
   "Version of the fz-index package.
 Prebuilt modules are published under the GitHub release tagged
 \"v\" concatenated with this version.")
@@ -211,18 +211,57 @@ by a background rescan (stale-while-revalidate), so the first
       (make-directory (file-name-directory file) t)
       (fz-index-save handle file))))
 
+(defcustom fz-index-max-age 3600
+  "Seconds an in-memory index is served before a background refresh.
+When `fz-index-open-file' (or a completion table) is invoked and the
+index for its root is older than this, a background rescan replaces
+it, invisibly: the old index keeps serving queries until the rescan
+finishes.  0 means never refresh on age."
+  :type 'integer)
+
+(defvar fz-index--index-times (make-hash-table :test 'equal)
+  "When each root's index was (re)built, for age-based refresh.")
+
+(defvar fz-index--refreshing (make-hash-table :test 'equal)
+  "Roots with an age-triggered rescan already in flight.")
+
+(defun fz-index--refresh (root handle)
+  "Rescan ROOT in the background, replacing HANDLE when done."
+  (let ((proc (make-pipe-process
+               :name (format "fz-index-refresh:%s" root)
+               :buffer nil
+               :noquery t
+               :filter #'fz-index--index-notify)))
+    (process-put proc 'fz-index-root root)
+    (process-put proc 'fz-index-stale handle)
+    (process-put proc 'fz-index-fresh (fz-index-build root proc))
+    (puthash root proc fz-index--refreshing)))
+
 (defun fz-index--index-for (root)
   "Return the index handle for ROOT, building or refreshing as needed.
 When a cache file exists, its index is returned immediately and a
 background rescan replaces it once finished
 (stale-while-revalidate).  Otherwise a background scan builds the
 index; a pipe process filter updates any active `fz-index-open-file'
-session when the index becomes ready.  Remote (TRAMP) directories
-are not supported: the module indexes the local filesystem only."
+session when the index becomes ready.  A live index older than
+`fz-index-max-age' is likewise refreshed in the background.  Remote
+(TRAMP) directories are not supported: the module indexes the local
+filesystem only."
   (when (file-remote-p root)
     (user-error "fz-index: cannot index remote directory %s (TRAMP is not supported)"
                 root))
-  (or (gethash root fz-index--indexes)
+  (let ((handle (gethash root fz-index--indexes)))
+    (cond
+     (handle
+      (when (and (> fz-index-max-age 0)
+                 (fz-index-ready-p handle)
+                 (> (float-time
+                     (time-since (gethash root fz-index--index-times 0)))
+                    fz-index-max-age)
+                 (not (gethash root fz-index--refreshing)))
+        (fz-index--refresh root handle))
+      handle)
+     (t
       (let* ((proc (make-pipe-process
                     :name (format "fz-index:%s" root)
                     :buffer nil
@@ -231,6 +270,8 @@ are not supported: the module indexes the local filesystem only."
              (cached (and fz-index-cache-enabled
                           (fz-index--load-cache root))))
         (process-put proc 'fz-index-root root)
+        ;; Mark the in-flight build/refresh against duplicate triggers.
+        (puthash root proc fz-index--refreshing)
         (when cached
           (process-put proc 'fz-index-stale cached))
         (let ((handle (fz-index-build root proc)))
@@ -241,7 +282,7 @@ are not supported: the module indexes the local filesystem only."
                 cached)
             (message "fz-index: indexing %s in the background ..." root)
             (puthash root handle fz-index--indexes)
-            handle)))))
+            handle)))))))
 
 (defun fz-index--index-notify (proc _string)
   "Process filter run when the background scan for PROC's root finishes.
@@ -252,12 +293,14 @@ the dynamic bindings of the `fz-index-open-file' session are still in scope."
         (stale (process-get proc 'fz-index-stale))
         (fresh (process-get proc 'fz-index-fresh)))
     (delete-process proc)
+    (remhash root fz-index--refreshing)
     (cond
      ;; Refresh of a cached index: swap in the fresh handle.
      (fresh
       (if (fz-index-ready-p fresh)
           (progn
             (puthash root fresh fz-index--indexes)
+            (puthash root (float-time) fz-index--index-times)
             (fz-index-destroy stale)
             (fz-index--save-cache root fresh)
             (message "fz-index: %s, %d files (refreshed)"
@@ -268,6 +311,7 @@ the dynamic bindings of the `fz-index-open-file' session are still in scope."
      (t
       (when-let* ((handle (gethash root fz-index--indexes)))
         (when (fz-index-ready-p handle)
+          (puthash root (float-time) fz-index--index-times)
           (fz-index--save-cache root handle)
           (message "fz-index: %s, %d files" root (fz-index-count handle))))))
     ;; Refresh an active minibuffer session for this root.
@@ -284,11 +328,21 @@ Also clears the base directory set by `fz-index-open-set-base'.
 Rebuild happens on the next `fz-index-open-file'."
   (interactive)
   (let ((root (or root (fz-index--root))))
+    (when-let* ((proc (gethash root fz-index--refreshing)))
+      (when (process-live-p proc)
+        (delete-process proc))
+      (when-let* ((fresh (process-get proc 'fz-index-fresh)))
+        (fz-index-destroy fresh))
+      (remhash root fz-index--refreshing))
     (when-let* ((handle (gethash root fz-index--indexes)))
       (fz-index-destroy handle)
       (remhash root fz-index--indexes)
-      (message "fz-index: dropped index for %s" root)))
+      (message "fz-index: dropped index for %s" root))
+    (remhash root fz-index--index-times))
   (setq fz-index-base-directory nil))
+
+(defvar fz-index--query-history nil
+  "Minibuffer history of past fz queries (M-p / M-n to browse).")
 
 ;;;###autoload
 (defun fz-index-open-file ()
@@ -335,7 +389,8 @@ Rebuild happens on the next `fz-index-open-file'."
               (fz-index--update))
           (fz-index--show-results-window results-buf)
           (when-let* ((choice (read-from-minibuffer
-                               (format "fz [%s]: " root) nil keymap)))
+                               (format "fz [%s]: " root) nil keymap
+                               nil 'fz-index--query-history)))
             (if (not (and fz-index--candidates
                           (< fz-index--selected (length fz-index--candidates))))
                 (message "fz: no candidate selected")
@@ -406,14 +461,15 @@ With empty input, the most-opened files of this root are shown."
       (fz-index--render))))
 
 (defun fz-index--history-candidates (root)
-  "Return the open-history entries under ROOT, most opened first.
+  "Return the open-history entries under ROOT, best frecency first.
 The result has the same (RELATIVE-PATH SCORE POSITIONS) shape as
 `fz-query', with nil POSITIONS (nothing to highlight)."
   (let (out)
-    (maphash (lambda (abs count)
+    (maphash (lambda (abs _)
                (when (and (string-prefix-p root abs)
                           (file-exists-p abs))
-                 (push (list (substring abs (length root)) count nil)
+                 (push (list (substring abs (length root))
+                             (fz-index--frecency-score abs) nil)
                        out)))
              fz-index--history)
     (seq-take (sort out (lambda (a b) (> (cadr a) (cadr b))))
@@ -532,9 +588,41 @@ and scroll the results window so the selection stays visible."
 
 ;;; Frecency
 
+(defcustom fz-index-frecency-half-life 7
+  "Half-life of the frecency recency decay, in days.
+The history bonus of a file halves every this many days since it was
+last opened, so long-unopened favorites gradually lose their lead.
+0 disables the decay (pure frequency)."
+  :type 'number)
+
+(defun fz-index--history-entry (abs)
+  "Return ABS's history entry as (COUNT . TIMESTAMP), or nil.
+Entries written before timestamps existed (plain integer counts)
+read as (COUNT . 0), which the scorer treats as non-decaying."
+  (let ((e (gethash abs fz-index--history)))
+    (cond
+     ((consp e) e)
+     ((integerp e) (cons e 0))
+     (t nil))))
+
+(defun fz-index--frecency-score (abs)
+  "Return the decay-weighted open count of ABS.
+log2(count+1) compressed by a half-life decay on the last-open time."
+  (let ((e (fz-index--history-entry abs)))
+    (if (null e)
+        0
+      (* (log (1+ (car e)) 2)
+         (if (or (zerop fz-index-frecency-half-life)
+                 (zerop (cdr e)))
+             1
+           (expt 0.5 (/ (float-time (time-since (cdr e)))
+                        (* fz-index-frecency-half-life 86400.0))))))))
+
 (defun fz-index--record (abs)
   "Record one open of file ABS in the history."
-  (puthash abs (1+ (gethash abs fz-index--history 0)) fz-index--history))
+  (let ((e (fz-index--history-entry abs)))
+    (puthash abs (cons (1+ (if e (car e) 0)) (float-time))
+             fz-index--history)))
 
 (defun fz-index--apply-frecency (candidates root)
   "Re-sort CANDIDATES ((REL SCORE POSITIONS) ...) with the history bonus."
@@ -544,8 +632,8 @@ and scroll the results window so the selection stays visible."
                          (+ (cadr c)
                             (min fz-index-frecency-max-boost
                                  (* fz-index-frecency-boost
-                                    (gethash (expand-file-name (car c) root)
-                                             fz-index--history 0))))
+                                    (fz-index--frecency-score
+                                     (expand-file-name (car c) root)))))
                          (caddr c)))
                  candidates)))
     (sort boosted (lambda (a b) (> (cadr a) (cadr b))))))
@@ -554,14 +642,19 @@ and scroll the results window so the selection stays visible."
   "Persist the open history to `fz-index-history-file'."
   (let ((entries nil))
     (maphash (lambda (k v) (push (cons k v) entries)) fz-index--history)
-    (setq entries (seq-take (sort entries (lambda (a b) (> (cdr a)
-                                                           (cdr b))))
+    (setq entries (seq-take (sort entries (lambda (a b)
+                                            (> (fz-index--frecency-score
+                                                (car a))
+                                               (fz-index--frecency-score
+                                                (car b)))))
                             1000))
     (with-temp-file fz-index-history-file
       (prin1 entries (current-buffer)))))
 
 (defun fz-index--history-load ()
-  "Load the open history from `fz-index-history-file'."
+  "Load the open history from `fz-index-history-file'.
+Entries written before timestamps existed (plain integer counts)
+are migrated with the current time, i.e. they start undecayed."
   (when (file-exists-p fz-index-history-file)
     (with-temp-buffer
       (insert-file-contents fz-index-history-file)
@@ -570,8 +663,14 @@ and scroll the results window so the selection stays visible."
         (when (listp entries)
           (clrhash fz-index--history)
           (dolist (e entries)
-            (when (and (consp e) (stringp (car e)) (integerp (cdr e)))
-              (puthash (car e) (cdr e) fz-index--history))))))))
+            (when (and (consp e) (stringp (car e)))
+              (let ((v (cdr e)))
+                (cond
+                 ((integerp v)
+                  (puthash (car e) (cons v (float-time))
+                           fz-index--history))
+                 ((and (consp v) (integerp (car v)) (numberp (cdr v)))
+                  (puthash (car e) v fz-index--history)))))))))))
 
 (add-hook 'kill-emacs-hook #'fz-index--history-save)
 (fz-index--history-load)
@@ -675,9 +774,14 @@ again.  While the index is still building, the table is empty."
   (lambda (string _pred action)
     (cond
      ((eq action 'metadata)
+      ;; eager-display/eager-update (Emacs 31.1): show and update
+      ;; *Completions* live in the default UI; older Emacsen ignore
+      ;; unknown metadata keys.
       '(metadata (category . fz-index)
                  (display-sort-function . identity)
-                 (cycle-sort-function . identity)))
+                 (cycle-sort-function . identity)
+                 (eager-display . t)
+                 (eager-update . t)))
      ((eq action 'lambda)
       nil)
      ((or (eq action t) (eq action 'all-completions))
@@ -703,7 +807,8 @@ The base directory is the same one `fz-index-open-file' would use."
          (completion-styles '(fz-index))
          (rel (completing-read
                (or prompt (format "fz [%s]: " root))
-               (fz-index-completion-table root))))
+               (fz-index-completion-table root)
+               nil nil nil 'fz-index--query-history)))
     (when (and rel (not (string-empty-p rel)))
       (find-file (expand-file-name rel root)))))
 

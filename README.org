@@ -82,23 +82,30 @@ under MSYS2).
   debounced by =fz-index-preview-delay= so rapid navigation stays
   free; =C-l= toggles preview (files larger than
   =fz-index-preview-max-size= are skipped)
-- Opened files get a frecency bonus on later queries; history
-  persists in =fz-index-history-file= (see
-  =fz-index-frecency-boost= / =fz-index-frecency-max-boost=)
+- Opened files get a frecency bonus on later queries: log2-compressed
+  open counts with a half-life decay on the last-open time
+  (=fz-index-frecency-half-life=, default 7 days), so stale favorites
+  gradually lose their lead; history persists in
+  =fz-index-history-file=
+- =M-p= / =M-n= browse your previous queries (minibuffer history)
 - =M-x fz-index-reset= — drop the cached index (rebuilt on next
   query) and clear the base set by =fz-index-open-set-base=
 - =M-x fz-index-read-file= — the same search through
   =completing-read=, for users of vertico/icomplete/fido or the
-  default completion UI.  =fz-index-completion-table= exposes the
-  engine for custom integrations (see the docstring)
+  default completion UI (on Emacs 31.1+, =*Completions*= appears and
+  updates live via the eager-display/eager-update metadata).
+  =fz-index-completion-table= exposes the engine for custom
+  integrations (see the docstring)
 
 Indexing runs on a background thread and honors =.gitignore=
 (including per-directory files and =.git/info/exclude=).  Indexes are
 persisted under =user-emacs-directory/fz-index/= and served
 stale-while-revalidate style: the first search of a session starts
 from the cache instantly while a background rescan refreshes it
-(=fz-index-cache-enabled= to disable).  Repeated keystrokes rescore
-only the previous match set (incremental narrowing).
+(=fz-index-cache-enabled= to disable).  Live indexes older than
+=fz-index-max-age= (default 1 hour) are likewise refreshed in the
+background.  Repeated keystrokes rescore only the previous match set
+(incremental narrowing).
 
 =(fz-index-build ROOT &optional NOTIFY-PROCESS NO-GITIGNORE)= is the
 module entry point if you want to drive it yourself; see also
