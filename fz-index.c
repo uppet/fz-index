@@ -830,7 +830,10 @@ fz_query_worker (void *arg)
 static void
 fz_index_finalizer (void *ptr)
 {
-  fz_index_free (ptr);
+  /* `fz-index-destroy' NULLs the user pointer after freeing, so the
+     finalizer can legitimately be called with NULL.  */
+  if (ptr)
+    fz_index_free (ptr);
 }
 
 static fz_index *
@@ -1244,6 +1247,146 @@ Ffz_index_destroy (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 }
 
 /* ------------------------------------------------------------------ */
+/* On-disk cache                                                       */
+/* ------------------------------------------------------------------ */
+
+/* Cache file format, bytewise little-endian:
+     8 bytes  magic FZ_CACHE_MAGIC
+     u32      entry count
+     u32      root byte length, then the root bytes (informational)
+     per entry: u32 path byte length, then the path bytes (no NUL)  */
+#define FZ_CACHE_MAGIC "FZIDX001"
+#define FZ_CACHE_MAGIC_LEN 8
+/* Sanity limits guarding against corrupted cache files.  */
+#define FZ_CACHE_MAX_COUNT (1u << 26)
+#define FZ_CACHE_MAX_PATH 65535
+
+/* (fz-index-save HANDLE PATH) */
+static emacs_value
+Ffz_index_save (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                void *data)
+{
+  (void) nargs;
+  (void) data;
+  fz_index *ix = get_index (env, args[0]);
+  if (!ix || atomic_load (&ix->state) != FZ_READY)
+    return env->intern (env, "nil");
+
+  ptrdiff_t len = 0;
+  if (!env->copy_string_contents (env, args[1], NULL, &len))
+    return env->intern (env, "nil");
+  char *path = malloc (len);
+  if (!path)
+    return env->intern (env, "nil");
+  env->copy_string_contents (env, args[1], path, &len);
+
+  FILE *f = fopen (path, "wb");
+  free (path);
+  if (!f)
+    return env->intern (env, "nil");
+  bool ok = fwrite (FZ_CACHE_MAGIC, 1, FZ_CACHE_MAGIC_LEN, f)
+            == FZ_CACHE_MAGIC_LEN;
+  uint32_t v = (uint32_t) ix->count;
+  ok = ok && fwrite (&v, sizeof v, 1, f) == 1;
+  uint32_t rlen = ix->root ? (uint32_t) strlen (ix->root) : 0;
+  ok = ok && fwrite (&rlen, sizeof rlen, 1, f) == 1;
+  ok = ok && (rlen == 0 || fwrite (ix->root, 1, rlen, f) == rlen);
+  for (size_t i = 0; ok && i < ix->count; i++)
+    {
+      uint32_t pl = ix->lens[i];
+      ok = fwrite (&pl, sizeof pl, 1, f) == 1
+           && fwrite (ix->paths + ix->offs[i], 1, pl, f) == pl;
+    }
+  ok = fclose (f) == 0 && ok;
+  return ok ? env->intern (env, "t") : env->intern (env, "nil");
+}
+
+/* (fz-index-load PATH ROOT) */
+static emacs_value
+Ffz_index_load (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+                void *data)
+{
+  (void) nargs;
+  (void) data;
+  ptrdiff_t len = 0;
+  if (!env->copy_string_contents (env, args[0], NULL, &len))
+    return env->intern (env, "nil");
+  char *path = malloc (len);
+  if (!path)
+    return env->intern (env, "nil");
+  env->copy_string_contents (env, args[0], path, &len);
+  if (!env->copy_string_contents (env, args[1], NULL, &len))
+    {
+      free (path);
+      return env->intern (env, "nil");
+    }
+  char *root = malloc (len);
+  if (!root)
+    {
+      free (path);
+      return env->intern (env, "nil");
+    }
+  env->copy_string_contents (env, args[1], root, &len);
+
+  fz_index *ix = NULL;
+  FILE *f = fopen (path, "rb");
+  free (path);
+  if (!f)
+    goto fail;
+  {
+    char magic[FZ_CACHE_MAGIC_LEN];
+    uint32_t count, rlen;
+    if (fread (magic, 1, FZ_CACHE_MAGIC_LEN, f) != FZ_CACHE_MAGIC_LEN
+        || memcmp (magic, FZ_CACHE_MAGIC, FZ_CACHE_MAGIC_LEN) != 0
+        || fread (&count, sizeof count, 1, f) != 1
+        || count > FZ_CACHE_MAX_COUNT
+        || fread (&rlen, sizeof rlen, 1, f) != 1)
+      goto fail_close;
+    /* The cache file name already identifies the root; the stored
+       root is informational only.  */
+    if (rlen > 0)
+      {
+        char scratch[256];
+        size_t left = rlen;
+        while (left > 0)
+          {
+            size_t chunk = left < sizeof scratch ? left : sizeof scratch;
+            if (fread (scratch, 1, chunk, f) != chunk)
+              goto fail_close;
+            left -= chunk;
+          }
+      }
+    ix = malloc (sizeof *ix);
+    if (!ix)
+      goto fail_close;
+    fz_index_init (ix);
+    ix->root = root;
+    for (uint32_t i = 0; i < count; i++)
+      {
+        uint32_t pl;
+        char buf[FZ_CACHE_MAX_PATH];
+        if (fread (&pl, sizeof pl, 1, f) != 1 || pl > FZ_CACHE_MAX_PATH
+            || fread (buf, 1, pl, f) != pl
+            || fz_index_add (ix, buf, pl) != 0)
+          goto fail_close;
+      }
+    fclose (f);
+    atomic_store (&ix->state, FZ_READY);
+    return wrap_index (env, ix);
+  }
+fail_close:
+  fclose (f);
+fail:
+  free (root);
+  if (ix)
+    {
+      ix->root = NULL;          /* ROOT is freed separately above */
+      fz_index_free (ix);
+    }
+  return env->intern (env, "nil");
+}
+
+/* ------------------------------------------------------------------ */
 /* Registration                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -1288,6 +1431,14 @@ emacs_module_init (struct emacs_runtime *runtime)
          "case-insensitively; any uppercase letter makes it case-sensitive.");
   defun (env, "fz-index-destroy", 1, 1, Ffz_index_destroy,
          "Free index HANDLE.  Also happens automatically via GC.");
+  defun (env, "fz-index-save", 2, 2, Ffz_index_save,
+         "Write the ready index HANDLE to file PATH.\n"
+         "Return t on success, nil otherwise.");
+  defun (env, "fz-index-load", 2, 2, Ffz_index_load,
+         "Load an index previously written with `fz-index-save'.\n"
+         "PATH is the cache file, ROOT the index root (informational).\n"
+         "Return a ready handle, or nil if the file is missing or\n"
+         "corrupt.");
 
   emacs_value feat = env->intern (env, "fz-index");
   env->funcall (env, env->intern (env, "provide"), 1,

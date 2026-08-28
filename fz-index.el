@@ -48,7 +48,9 @@
 (declare-function fz-index-build "fz-index")
 (declare-function fz-index-count "fz-index")
 (declare-function fz-index-destroy "fz-index")
+(declare-function fz-index-load "fz-index")
 (declare-function fz-index-ready-p "fz-index")
+(declare-function fz-index-save "fz-index")
 (declare-function fz-query "fz-index")
 
 (defgroup fz-index nil
@@ -168,30 +170,90 @@ used as the base."
   (setq fz-index-base-directory (expand-file-name dir))
   (message "fz base: %s" fz-index-base-directory))
 
+(defcustom fz-index-cache-enabled t
+  "When non-nil, indexes are persisted under `user-emacs-directory'.
+A cached index loads instantly on the next session and is refreshed
+by a background rescan (stale-while-revalidate), so the first
+`fz-index-open-file' of a session does not wait for a full scan."
+  :type 'boolean)
+
+(defun fz-index--cache-file (root)
+  "Return the on-disk cache file for ROOT's index."
+  (expand-file-name (concat "fz-index/" (secure-hash 'sha1 root) ".cache")
+                    user-emacs-directory))
+
+(defun fz-index--load-cache (root)
+  "Return a ready index handle from ROOT's cache file, or nil."
+  (let ((file (fz-index--cache-file root)))
+    (when (file-exists-p file)
+      (let ((h (ignore-errors (fz-index-load file root))))
+        (when h
+          (message "fz-index: %s, %d files (cached; refreshing in background)"
+                   root (fz-index-count h))
+          h)))))
+
+(defun fz-index--save-cache (root handle)
+  "Persist HANDLE as ROOT's cache file."
+  (when fz-index-cache-enabled
+    (let ((file (fz-index--cache-file root)))
+      (make-directory (file-name-directory file) t)
+      (fz-index-save handle file))))
+
 (defun fz-index--index-for (root)
-  "Return the index handle for ROOT, starting a background build if needed.
-The scan runs on a module worker thread; a pipe process filter updates
-any active `fz-index-open-file' session when the index becomes ready."
+  "Return the index handle for ROOT, building or refreshing as needed.
+When a cache file exists, its index is returned immediately and a
+background rescan replaces it once finished
+(stale-while-revalidate).  Otherwise a background scan builds the
+index; a pipe process filter updates any active `fz-index-open-file'
+session when the index becomes ready."
   (or (gethash root fz-index--indexes)
-      (let ((proc (make-pipe-process
-                   :name (format "fz-index:%s" root)
-                   :buffer nil
-                   :noquery t
-                   :filter #'fz-index--index-notify)))
+      (let* ((proc (make-pipe-process
+                    :name (format "fz-index:%s" root)
+                    :buffer nil
+                    :noquery t
+                    :filter #'fz-index--index-notify))
+             (cached (and fz-index-cache-enabled
+                          (fz-index--load-cache root))))
         (process-put proc 'fz-index-root root)
-        (message "fz-index: indexing %s in the background ..." root)
+        (when cached
+          (process-put proc 'fz-index-stale cached))
         (let ((handle (fz-index-build root proc)))
-          (puthash root handle fz-index--indexes)
-          handle))))
+          (if cached
+              (progn
+                (process-put proc 'fz-index-fresh handle)
+                (puthash root cached fz-index--indexes)
+                cached)
+            (message "fz-index: indexing %s in the background ..." root)
+            (puthash root handle fz-index--indexes)
+            handle)))))
 
 (defun fz-index--index-notify (proc _string)
-  "Process filter run when the index for PROC's root is ready.
+  "Process filter run when the background scan for PROC's root finishes.
+Replaces a stale cached index with the fresh one and persists it.
 Filters run on the main thread while `read-from-minibuffer' waits, so
 the dynamic bindings of the `fz-index-open-file' session are still in scope."
-  (let ((root (process-get proc 'fz-index-root)))
+  (let ((root (process-get proc 'fz-index-root))
+        (stale (process-get proc 'fz-index-stale))
+        (fresh (process-get proc 'fz-index-fresh)))
     (delete-process proc)
-    (when-let* ((handle (gethash root fz-index--indexes)))
-      (message "fz-index: %s, %d files" root (fz-index-count handle)))
+    (cond
+     ;; Refresh of a cached index: swap in the fresh handle.
+     (fresh
+      (if (fz-index-ready-p fresh)
+          (progn
+            (puthash root fresh fz-index--indexes)
+            (fz-index-destroy stale)
+            (fz-index--save-cache root fresh)
+            (message "fz-index: %s, %d files (refreshed)"
+                     root (fz-index-count fresh)))
+        ;; Rescan failed; keep serving the cached index.
+        (fz-index-destroy fresh)))
+     ;; Plain first build: the handle is already in the table.
+     (t
+      (when-let* ((handle (gethash root fz-index--indexes)))
+        (when (fz-index-ready-p handle)
+          (fz-index--save-cache root handle)
+          (message "fz-index: %s, %d files" root (fz-index-count handle))))))
     ;; Refresh an active minibuffer session for this root.
     (when (and (boundp 'fz-index--root)
                (equal (symbol-value 'fz-index--root) root))
