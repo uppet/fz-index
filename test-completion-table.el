@@ -46,6 +46,29 @@
              (all-completions "emacs.c" table))))
   (princ "completion-table tests passed\n"))
 
+;; Compatibility across completion styles (all-completions, fuzzy
+;; query "emc"): basic-family styles do not re-filter; flex shares
+;; the subsequence semantics, so candidates survive (ordering then
+;; follows flex's own cost model); the fz-index style preserves our
+;; scoring.  (orderless with its default regexp matching WOULD drop
+;; them -- hence fz-index-read-file binds (fz-index).)
+(clrhash fz-index--indexes)
+(let ((user-emacs-directory "/tmp/fz-ct-uem2/")
+      (table (fz-index-completion-table "/tmp/fz-ct/"))
+      (deadline (+ (float-time) 30)))
+  (make-directory user-emacs-directory t)
+  (funcall table "x" nil 'all-completions)
+  (while (and (not (let ((h (gethash "/tmp/fz-ct/" fz-index--indexes)))
+                     (and h (fz-index-ready-p h))))
+              (< (float-time) deadline))
+    (accept-process-output nil 0.05))
+  (dolist (style '(basic partial-completion emacs22 flex fz-index))
+    (let ((completion-styles (list style)))
+      (unless (equal (all-completions "emc" table) '("src/emacs.c"))
+        (error "BUG: style %s lost fuzzy candidates => %S"
+               style (all-completions "emc" table)))))
+  (princ "style compatibility tests passed\n"))
+
 (let ((h (gethash "/tmp/fz-ct/" fz-index--indexes)))
   (when h (fz-index-destroy h)))
 (clrhash fz-index--indexes)
@@ -53,5 +76,6 @@
 (delete-file "/tmp/fz-ct/src/main.c")
 (delete-directory "/tmp/fz-ct/src")
 (delete-directory "/tmp/fz-ct")
-(delete-directory "/tmp/fz-ct-uem" t)
+(delete-directory "/tmp/fz-ct-uem" t
+(delete-directory "/tmp/fz-ct-uem2" t))
 (princ "completion-table tests done\n")
