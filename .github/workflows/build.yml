@@ -59,6 +59,8 @@ jobs:
           gcc -O1 -g -fsanitize=address,undefined
           -fno-omit-frame-pointer -std=c99 -fPIC -shared
           -o fz-index.so fz-index.c -lpthread
+      - name: Byte-compile the UI
+        run: emacs -Q --batch --eval '(byte-compile-file "fz-index.el")'
       - name: Run tests under ASan
         run: |
           set -e
