@@ -1,0 +1,5 @@
+*.elc
+*.so
+*.dll
+*.dylib
+fz-index-history.el

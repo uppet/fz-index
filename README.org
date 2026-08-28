@@ -1,0 +1,118 @@
+#+TITLE: fz-index — Sublime-style fuzzy file open for Emacs
+
+Native-index fuzzy file search that stays responsive at Chromium scale
+(400k+ files).  The candidate index lives in a C dynamic module (outside
+the Emacs Lisp heap); each keystroke only pulls top-K results into Lisp.
+
+* Install
+
+The package consists of =fz-index.el= plus a small C module.  The
+module is installed automatically on first use — no manual build step
+is needed in the common case.
+
+** package-vc (Emacs 29+)
+
+#+begin_src elisp
+(package-vc-install "https://github.com/uppet/fz-index")
+(global-set-key (kbd "C-c f") #'fz-index-open-file)
+#+end_src
+
+** use-package :vc (Emacs 30+)
+
+#+begin_src elisp
+(use-package fz-index
+  :vc (:url "https://github.com/uppet/fz-index")
+  :bind ("C-c f" . fz-index-open-file))
+#+end_src
+
+** MELPA
+
+Not yet; the recipe is prepared in =melpa-recipe= and submission is
+planned.
+
+** Manual
+
+#+begin_src elisp
+(add-to-list 'load-path "/path/to/fz-index")
+(require 'fz-index)
+(global-set-key (kbd "C-c f") #'fz-index-open-file)
+#+end_src
+
+** The native module
+
+=M-x fz-index-open-file= needs the =fz-index= dynamic module.  On first
+use, =fz-index-ensure-module= installs it automatically
+(=fz-index-module-auto-install=, default t):
+
+1. A prebuilt binary matching your platform is downloaded from
+   GitHub Releases and verified against the published SHA-256
+   checksum (Linux/macOS/Windows, x86_64 and aarch64).
+2. Failing that, the bundled =fz-index.c= is compiled with a local
+   gcc/clang (needs only =emacs-module.h= and a C99 compiler).
+
+Run =M-x fz-index-ensure-module= to install ahead of time, or build
+by hand with =make= (=make fz-index.dll= cross-compiles for Windows
+with =gcc-mingw-w64-x86-64=; the same source also builds natively
+under MSYS2).
+
+* Usage
+
+- =M-x fz-index-open-set-base= — set the base directory (like
+  Sublime's project folder); all later =fz-index-open-file= calls
+  search from there.  Without it, the current directory is the base
+- =M-x fz-index-open-file= — fuzzy-find a file under the base
+  directory; with empty input, your most-opened files under the base
+  are shown
+- Type to narrow; =C-n= / =C-p= (or =M-<down>= / =M-<up>=) to move
+  (the results window scrolls to follow the selection), or click a
+  candidate with the mouse to open it directly
+- =C-o= jumps between the minibuffer and the results buffer; in the
+  results buffer, isearch (=C-s=) works and =RET= opens the file on
+  the current line
+- =TAB= fills the minibuffer with the selected candidate, so you can
+  refine the query from it
+- =RET= open, =C-u RET= open in another window,
+  =M-RET= insert the relative path into the buffer you came from,
+  =C-g= quit
+- Moving the selection previews the file in the origin window;
+  =C-l= toggles preview (files larger than
+  =fz-index-preview-max-size= are skipped)
+- Opened files get a frecency bonus on later queries; history
+  persists in =fz-index-history-file= (see
+  =fz-index-frecency-boost= / =fz-index-frecency-max-boost=)
+- =M-x fz-index-reset= — drop the cached index (rebuilt on next
+  query) and clear the base set by =fz-index-open-set-base=
+
+Indexing runs on a background thread and honors =.gitignore=
+(including per-directory files and =.git/info/exclude=); queries are
+answered while "indexing ..." is still shown as soon as the index is
+ready.  Repeated keystrokes rescore only the previous match set
+(incremental narrowing).
+
+=(fz-index-build ROOT &optional NOTIFY-PROCESS NO-GITIGNORE)= is the
+module entry point if you want to drive it yourself.
+
+Matching: subsequence with Sublime-style scoring (consecutive,
+word-boundary, camelCase and in-file-name bonuses).  Both leftmost and
+rightmost alignments are scored and the better one wins, so a query
+like =emacs.c= ranks =src/emacs.c= first.  Smart case: all-lowercase
+pattern is case-insensitive; any uppercase makes it sensitive.
+
+* How it differs from consult-find / projectile / fzf.el
+
+- =consult-find= and =fzf.el= shell out to an external program
+  (find/fd/fzf) and stream the whole file list through a process
+  pipe; fz-index keeps the index in-process, so per-keystroke cost
+  does not depend on process startup or pipe throughput.
+- =projectile= and friends index in Emacs Lisp, where hundreds of
+  thousands of file names pressure the GC; fz-index holds paths in C
+  memory and hands Lisp only the top 100 matches per keystroke.
+- Matching and ranking follow Sublime Text's Goto Anything,
+  including its habit of ranking =src/emacs.c= first for =emacs.c=.
+
+* Performance (400k files, synthetic third_party-style tree)
+
+| operation     | time      |
+|---------------+-----------|
+| cold index    | ~0.7 s    |
+| per-keystroke | 24–38 ms  |

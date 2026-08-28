@@ -1,0 +1,117 @@
+name: build
+
+on:
+  push:
+    branches: [master, main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs: ['28.2', '29.4', '30.2']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+      - name: Build the module
+        run: make
+      - name: Byte-compile and parens check
+        run: >
+          emacs -Q --batch
+          --eval '(with-current-buffer (find-file "fz-index.el") (check-parens))'
+          --eval '(byte-compile-file "fz-index.el")'
+      - name: Run tests
+        run: |
+          set -e
+          for t in test-m3.el test-m4.el test-open.el test-ui-fix.el test-ui-flow.el; do
+            echo "== $t"
+            emacs -Q --batch -L . -l "$t"
+          done
+      - name: Tag matches Version header
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          grep -q "^;; Version: $tag\$" fz-index.el || {
+            echo "::error::tag v$tag does not match the Version header in fz-index.el"
+            exit 1
+          }
+
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: MINGW64
+          install: make mingw-w64-x86_64-gcc
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: make fz-index.dll
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: make
+      - name: Build (macOS, arm64 + x86_64)
+        if: runner.os == 'macOS'
+        run: |
+          # Cross-compile both arches on the arm64 runner: the Intel
+          # runner pool (macos-13) is being retired and queues forever.
+          make CFLAGS="-O2 -Wall -Wextra -std=c99 -fPIC -arch arm64"
+          mv fz-index.dylib fz-index-aarch64-macos.dylib
+          make clean
+          make CFLAGS="-O2 -Wall -Wextra -std=c99 -fPIC -arch x86_64"
+          mv fz-index.dylib fz-index-x86_64-macos.dylib
+      - name: Stage assets
+        shell: bash
+        run: |
+          shopt -s nullglob
+          case "${{ runner.os }}" in
+            Linux)
+              case "$(uname -m)" in
+                x86_64)  cp fz-index.so fz-index-x86_64-linux-gnu.so ;;
+                aarch64) cp fz-index.so fz-index-aarch64-linux-gnu.so ;;
+                *) echo "unexpected arch $(uname -m)"; exit 1 ;;
+              esac ;;
+            Windows) cp fz-index.dll fz-index-x86_64-windows.dll ;;
+            macOS)   : ;;  # named by the build step already
+          esac
+          assets=(fz-index-x86_64-* fz-index-aarch64-*)
+          [ ${#assets[@]} -gt 0 ] || { echo "no staged assets"; exit 1; }
+          ls -l "${assets[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: module-${{ matrix.os }}
+          path: |
+            fz-index-x86_64-*
+            fz-index-aarch64-*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: module-*
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum fz-index-* > checksums.txt && cat checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            fz-index-*
+            checksums.txt

@@ -1,0 +1,5 @@
+;; MELPA recipe for fz-index, to be submitted as a pull request to
+;; melpa/melpa (copy this form into recipes/fz-index there).
+(fz-index :fetcher github :repo "uppet/fz-index"
+          :files ("fz-index.el" "fz-index.c" "emacs-module.h"
+                  "Makefile" "README.org"))
