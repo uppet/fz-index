@@ -65,38 +65,59 @@ under MSYS2).
   are shown
 - Type to narrow; =C-n= / =C-p= (or =M-<down>= / =M-<up>=) to move
   (the results window scrolls to follow the selection), or click a
-  candidate with the mouse to open it directly
+  candidate with the mouse to open it directly.  The matched
+  characters of each candidate are highlighted (face
+  =fz-index-match=)
+- *Multi-word queries*: space-separated words must all match, in any
+  order (=util hash c= finds =src/util/hash.c=), like Sublime and fzf
 - =C-o= jumps between the minibuffer and the results buffer; in the
-  results buffer, isearch (=C-s=) works and =RET= opens the file on
-  the current line
+  results buffer, isearch (=C-s=) works, =RET= opens the file on the
+  current line and =C-u RET= opens it in another window
 - =TAB= fills the minibuffer with the selected candidate, so you can
   refine the query from it
 - =RET= open, =C-u RET= open in another window,
   =M-RET= insert the relative path into the buffer you came from,
   =C-g= quit
-- Moving the selection previews the file in the origin window;
-  =C-l= toggles preview (files larger than
+- Moving the selection previews the file in the origin window,
+  debounced by =fz-index-preview-delay= so rapid navigation stays
+  free; =C-l= toggles preview (files larger than
   =fz-index-preview-max-size= are skipped)
 - Opened files get a frecency bonus on later queries; history
   persists in =fz-index-history-file= (see
   =fz-index-frecency-boost= / =fz-index-frecency-max-boost=)
 - =M-x fz-index-reset= — drop the cached index (rebuilt on next
   query) and clear the base set by =fz-index-open-set-base=
+- =M-x fz-index-read-file= — the same search through
+  =completing-read=, for users of vertico/icomplete/fido or the
+  default completion UI.  =fz-index-completion-table= exposes the
+  engine for custom integrations (see the docstring)
 
 Indexing runs on a background thread and honors =.gitignore=
-(including per-directory files and =.git/info/exclude=); queries are
-answered while "indexing ..." is still shown as soon as the index is
-ready.  Repeated keystrokes rescore only the previous match set
-(incremental narrowing).
+(including per-directory files and =.git/info/exclude=).  Indexes are
+persisted under =user-emacs-directory/fz-index/= and served
+stale-while-revalidate style: the first search of a session starts
+from the cache instantly while a background rescan refreshes it
+(=fz-index-cache-enabled= to disable).  Repeated keystrokes rescore
+only the previous match set (incremental narrowing).
 
 =(fz-index-build ROOT &optional NOTIFY-PROCESS NO-GITIGNORE)= is the
-module entry point if you want to drive it yourself.
+module entry point if you want to drive it yourself; see also
+=fz-index-save= / =fz-index-load= for the on-disk format.
 
 Matching: subsequence with Sublime-style scoring (consecutive,
-word-boundary, camelCase and in-file-name bonuses).  Both leftmost and
-rightmost alignments are scored and the better one wins, so a query
-like =emacs.c= ranks =src/emacs.c= first.  Smart case: all-lowercase
-pattern is case-insensitive; any uppercase makes it sensitive.
+word-boundary, camelCase and in-file-name bonuses).  Scoring uses a
+Smith-Waterman-style DP that evaluates every alignment, exactly like
+Sublime itself, so a query like =emacs.c= ranks =src/emacs.c= first.
+Smart case: all-lowercase pattern is case-insensitive; any uppercase
+makes it sensitive.
+
+* Limitations
+
+- Remote (TRAMP) directories cannot be indexed; the module reads the
+  local filesystem only and signals an error for remote roots.
+- File names that are not valid UTF-8 are skipped (the module API
+  cannot pass them to Lisp strings).
+
 
 * How it differs from consult-find / projectile / fzf.el
 

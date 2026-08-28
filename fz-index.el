@@ -5,7 +5,7 @@
 ;; Author: Joyer Huang <collger@gmail.com>
 ;; Assisted-by: Kimi Code CLI
 ;; Maintainer: Joyer Huang <collger@gmail.com>
-;; Version: 0.1.1
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: files, matching, convenience
 ;; URL: https://github.com/uppet/fz-index
@@ -57,7 +57,7 @@
   "Fast fuzzy file open backed by a native index."
   :group 'convenience)
 
-(defconst fz-index-version "0.1.1"
+(defconst fz-index-version "0.2.0"
   "Version of the fz-index package.
 Prebuilt modules are published under the GitHub release tagged
 \"v\" concatenated with this version.")

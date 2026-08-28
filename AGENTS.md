@@ -17,30 +17,39 @@ the surrounding style.
 ## Layout
 
 - `fz-index.c` — the Emacs dynamic module.  Holds the whole file
-  index in C memory (outside the Lisp heap), scores queries
-  (Sublime-style), honors .gitignore.  Exports: `fz-index-build`,
+  index in C memory (outside the Lisp heap), scores queries with a
+  Smith-Waterman-style DP under the Sublime scoring model (with a
+  memchr prefilter), honors .gitignore, persists indexes
+  (`fz-index-save`/`fz-index-load`).  Exports: `fz-index-build`,
   `fz-index-count`, `fz-index-ready-p`, `fz-index-destroy`,
-  `fz-query` (note: NO "index" in this one).
-- `fz-index.el` — the entire UI.  Minibuffer + bottom results side
-  window, frecency, preview, module auto-install.  Every public
-  symbol uses the `fz-index-` prefix (MELPA/package-lint
+  `fz-index-save`, `fz-index-load`, `fz-query` (note: NO "index" in
+  this one).  `fz-query` returns (RELATIVE-PATH SCORE POSITIONS).
+- `fz-index.el` — the entire UI plus `fz-index-read-file` and
+  `fz-index-completion-table` for completing-read integration.  Every
+  public symbol uses the `fz-index-` prefix (MELPA/package-lint
   requirement); internal symbols use `fz-index--`.
 - `emacs-module.h` — vendored module header; the build needs nothing
   else from Emacs.
 - `Makefile` — `make` (Linux .so / macOS .dylib), `make fz-index.dll`
   (Windows via mingw-w64 cross or MSYS2 native).
-- `test-*.el` — batch test scripts (NOT ert); each exits non-zero on
+- `fz-index-tests.el` — ERT unit tests for the module API (run with
+  `ert-run-tests-batch-and-exit`).  `test-*.el` — batch
+  integration/performance scripts (NOT ert); each exits non-zero on
   failure.  `melpa-recipe` — recipe to submit to melpa/melpa.
-- `.github/workflows/build.yml` — tests on Emacs 28.2/29.4/30.2,
-  builds prebuilt modules for 5 platform tags, publishes them +
-  `checksums.txt` to the GitHub release on `v*` tags.
+- `.github/workflows/build.yml` — ERT + integration tests on Emacs
+  28.2/29.4/30.2, an ASan+UBSan job, and prebuilt modules for 5
+  platform tags published with `checksums.txt` to the GitHub release
+  on `v*` tags.
 
 ## Build and test
 
 ```sh
 make                 # produces fz-index.so (or .dylib on macOS)
 emacs -Q --batch --eval '(byte-compile-file "fz-index.el")'
-for t in test-m3.el test-m4.el test-open.el test-ui-fix.el test-ui-flow.el; do
+emacs -Q --batch -L . -l fz-index-tests.el -f ert-run-tests-batch-and-exit
+for t in test-m3.el test-m4.el test-open.el test-ui-fix.el test-ui-flow.el \
+         test-multiword.el test-persist.el test-highlight.el \
+         test-completion-table.el test-fuzz.el; do
   emacs -Q --batch -L . -l "$t" || exit 1
 done
 ```
@@ -72,6 +81,18 @@ maintainer uses a locally built Emacs at `../build-31.1/src/emacs`.
   re-encodes bytes and produces a module that CRASHES dlopen.
   `fz-index--download-module` also re-hashes the file on disk after
   writing — keep both checks.
+- The module API only accepts valid UTF-8 for Lisp strings: paths
+  with raw-byte (non-UTF-8) file names are skipped at scan/load
+  time.  Never pass unvalidated bytes to `make_string`.
+- `default-directory` may keep a literal `~` abbreviation; C code
+  (`opendir`) does not expand it.  Always `expand-file-name` on the
+  Lisp side before calling into the module.
+- `fz-query` positions are BYTE offsets (the module works on UTF-8
+  bytes); convert with `byte-to-position` before putting text
+  properties, or multibyte paths highlight the wrong characters.
+- Tests that drive `fz-index-open-file` must bind
+  `user-emacs-directory` to a temp dir, otherwise the on-disk index
+  cache leaks into the real `~/.emacs.d/fz-index/`.
 - Module file suffix comes from `module-file-suffix` at runtime
   (.so / .dylib / .dll); never hard-code it.
 - The results buffer is read-only and line-indexed: candidate N is
