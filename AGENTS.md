@@ -17,10 +17,12 @@ the surrounding style.
 ## Layout
 
 - `fz-index.c` — the Emacs dynamic module.  Holds the whole file
-  index in C memory (outside the Lisp heap), scores queries with a
-  Smith-Waterman-style DP under the Sublime scoring model (with a
-  memchr prefilter), honors .gitignore, persists indexes
-  (`fz-index-save`/`fz-index-load`).  Exports: `fz-index-build`,
+  index in C memory (outside the Lisp heap), scans directories with a
+  worker pool fed by a shared queue (fd-style parallel traversal;
+  `.gitignore` state shared between workers as a refcounted chain of
+  `fz_ign_node`), scores queries with a Smith-Waterman-style DP under
+  the Sublime scoring model (with a memchr prefilter), persists
+  indexes (`fz-index-save`/`fz-index-load`).  Exports: `fz-index-build`,
   `fz-index-count`, `fz-index-ready-p`, `fz-index-destroy`,
   `fz-index-save`, `fz-index-load`, `fz-query` (note: NO "index" in
   this one).  `fz-query` returns (RELATIVE-PATH SCORE POSITIONS).
@@ -93,6 +95,13 @@ maintainer uses a locally built Emacs at `../build-31.1/src/emacs`.
 - Tests that drive `fz-index-open-file` must bind
   `user-emacs-directory` to a temp dir, otherwise the on-disk index
   cache leaks into the real `~/.emacs.d/fz-index/`.
+- The directory scan is multi-threaded (pool of ≤8 workers, shared
+  LIFO queue in `fz_scan_ctx`).  All queue handoffs happen under
+  `sc->mu`; `fz_index_add` is serialized under `ix->add_mu`;
+  `.gitignore` levels are refcounted `fz_ign_node`s — acquire when
+  enqueueing a child job, release when the job is done.  When touching
+  this code, re-run the cancel stress (build + immediate
+  `fz-index-destroy` in a loop) under ASan.
 - Interactive Emacs ignores SIGPIPE but BATCH Emacs does not: a
   worker thread writing to a pipe whose Lisp process was deleted
   mid-scan kills batch Emacs with SIGPIPE.  The build worker blocks

@@ -52,8 +52,6 @@ int plugin_is_GPL_compatible;
    ASCII-lowercased copies.  Entries are addressed by 32-bit offsets so
    the arenas can be realloc'd freely while scanning.  */
 
-struct fz_rule_level;
-
 typedef struct
 {
   char *paths;         /* arena of original paths, NUL-separated */
@@ -87,10 +85,8 @@ typedef struct
   atomic_int cancel;
   int pipe_fd;           /* -1 when there is no channel */
 
-  /* gitignore rule stack (worker thread only).  */
-  struct fz_rule_level *ign;
-  size_t ign_depth;
-  size_t ign_cap;
+  /* Serializes fz_index_add between the parallel scan workers.  */
+  pthread_mutex_t add_mu;
   bool no_gitignore;
 } fz_index;
 
@@ -103,6 +99,7 @@ fz_index_init (fz_index *ix)
   ix->pipe_fd = -1;
   atomic_init (&ix->state, FZ_BUILDING);
   atomic_init (&ix->cancel, 0);
+  pthread_mutex_init (&ix->add_mu, NULL);
 }
 
 static void
@@ -115,7 +112,7 @@ fz_index_free (fz_index *ix)
     }
   if (ix->pipe_fd >= 0)
     close (ix->pipe_fd);
-  free (ix->ign);
+  pthread_mutex_destroy (&ix->add_mu);
   free (ix->paths);
   free (ix->lower);
   free (ix->offs);
@@ -407,20 +404,77 @@ fz_rules_load (fz_rule_level *lvl, const char *path)
   fclose (f);
 }
 
-/* Decide whether REL (path relative to the index root) is ignored.
-   IS_DIR tells whether REL names a directory.  */
-static bool
-fz_ignored (fz_index *ix, const char *rel, bool is_dir)
+/* ------------------------------------------------------------------ */
+/* Parallel directory scan                                             */
+/* ------------------------------------------------------------------ */
+
+/* The scan follows the fd model: a pool of worker threads is fed by a
+   shared queue of pending directories; each worker scans the direct
+   entries of one directory at a time and enqueues the subdirectories
+   it finds.  The gitignore rule stack, formerly an array owned by the
+   single recursive scan, becomes a chain of immutable refcounted
+   nodes, so that workers share their ancestors' rules without
+   copying.  */
+
+typedef struct fz_ign_node
 {
-  for (size_t l = ix->ign_depth; l-- > 0;)
+  struct fz_ign_node *parent;
+  fz_rule_level lvl;
+  atomic_uint refs;
+} fz_ign_node;
+
+static void
+fz_ign_acquire (fz_ign_node *n)
+{
+  if (n)
+    atomic_fetch_add (&n->refs, 1);
+}
+
+static void
+fz_ign_release (fz_ign_node *n)
+{
+  while (n && atomic_fetch_sub (&n->refs, 1) == 1)
     {
-      fz_rule_level *lvl = &ix->ign[l];
+      fz_ign_node *parent = n->parent;
+      fz_rules_free (&n->lvl);
+      free (n);
+      n = parent;
+    }
+}
+
+/* Push a rule level for the directory whose relative path is DIR_LEN
+   bytes long, chained below PARENT.  The caller owns the new node's
+   reference.  */
+static fz_ign_node *
+fz_ign_push (fz_ign_node *parent, size_t dir_len)
+{
+  fz_ign_node *n = malloc (sizeof *n);
+  if (!n)
+    return NULL;
+  n->parent = parent;
+  memset (&n->lvl, 0, sizeof n->lvl);
+  n->lvl.dir_len = dir_len;
+  atomic_init (&n->refs, 1);
+  if (parent)
+    fz_ign_acquire (parent);
+  return n;
+}
+
+/* Decide whether REL (path relative to the index root) is ignored, by
+   walking the rule chain from the deepest level upwards.  IS_DIR
+   tells whether REL names a directory.  */
+static bool
+fz_ignored (const fz_ign_node *n, const char *rel, bool is_dir)
+{
+  for (; n; n = n->parent)
+    {
+      const fz_rule_level *lvl = &n->lvl;
       const char *sub = rel + lvl->dir_len + (lvl->dir_len ? 1 : 0);
       const char *base = strrchr (sub, '/');
       base = base ? base + 1 : sub;
       for (size_t r = lvl->n; r-- > 0;)
         {
-          fz_rule *rule = &lvl->rules[r];
+          const fz_rule *rule = &lvl->rules[r];
           if (rule->dir_only && !is_dir)
             continue;
           if (glob_match (rule->pat, rule->anchored ? sub : base))
@@ -430,62 +484,107 @@ fz_ignored (fz_index *ix, const char *rel, bool is_dir)
   return false;
 }
 
-/* Recursive directory scan.  DIR is the current absolute path prefix,
-   REL is the path relative to the index root ("" at top level).
-   Entries under any .git directory are always skipped; entries matched
-   by the gitignore rule stack are skipped as well (directories are
-   pruned without descending).  */
-static int
-fz_scan (fz_index *ix, const char *dir, const char *rel)
+/* A directory waiting to be scanned, plus the rule chain inherited
+   from its ancestors (an owned reference).  */
+typedef struct
 {
-  DIR *d = opendir (dir);
+  char *full;                   /* absolute path */
+  char *rel;                    /* path relative to the index root */
+  fz_ign_node *ign;
+} fz_scan_job;
+
+static void
+fz_scan_job_free (fz_scan_job *j)
+{
+  free (j->full);
+  free (j->rel);
+  fz_ign_release (j->ign);
+}
+
+/* Growable job vector: the shared work queue (LIFO), and each
+   worker's local list of newly found subdirectories.  */
+typedef struct
+{
+  fz_scan_job *v;
+  size_t n, cap;
+} fz_scan_jobs;
+
+static int
+fz_jobs_push (fz_scan_jobs *js, const fz_scan_job *j)
+{
+  if (js->n == js->cap)
+    {
+      size_t newcap = js->cap ? js->cap * 2 : 64;
+      fz_scan_job *nv = realloc (js->v, newcap * sizeof *nv);
+      if (!nv)
+        return -1;
+      js->v = nv;
+      js->cap = newcap;
+    }
+  js->v[js->n++] = *j;
+  return 0;
+}
+
+typedef struct
+{
+  fz_index *ix;
+  pthread_mutex_t mu;           /* guards the queue and fields below */
+  pthread_cond_t cv;            /* jobs arrived, or work ran out */
+  fz_scan_jobs queue;
+  size_t active;                /* jobs taken out, not yet finished */
+  bool stopping;                /* cancel or fatal error: wind down */
+  int rc;                       /* first error: 0, -1, or -2 */
+} fz_scan_ctx;
+
+/* Scan the direct entries of JOB's directory: regular files go into
+   the index (under the add mutex), subdirectories are appended to
+   CHILDREN.  Entries under any .git directory are always skipped;
+   entries matched by the gitignore rule chain are skipped as well
+   (directories are pruned without descending).  Returns 0, -1 on
+   fatal error (allocation failure or an unreadable root), or -2 if
+   the scan was cancelled.  */
+static int
+fz_scan_dir (fz_scan_ctx *sc, fz_scan_job *job, fz_scan_jobs *children)
+{
+  fz_index *ix = sc->ix;
+  DIR *d = opendir (job->full);
   if (!d)
     /* An unreadable subdirectory is skipped silently, but an
        unreadable root is a build failure.  */
-    return rel[0] == '\0' ? -1 : 0;
+    return job->rel[0] == '\0' ? -1 : 0;
 
-  /* Push this directory's gitignore rules onto the stack.  At the root,
-     .git/info/exclude is honored as well.  */
-  fz_rule_level lvl = { 0 };
-  lvl.dir_len = strlen (rel);
+  /* Load this directory's gitignore rules into a new chain node.  At
+     the root, .git/info/exclude is honored as well.  */
+  fz_ign_node *node = fz_ign_push (job->ign, strlen (job->rel));
+  if (!node)
+    {
+      closedir (d);
+      return -1;
+    }
   if (!ix->no_gitignore)
     {
-      size_t dirlen0 = strlen (dir);
-      char *gi = malloc (dirlen0 + sizeof "/.gitignore");
+      size_t dirlen = strlen (job->full);
+      char *gi = malloc (dirlen + sizeof "/.gitignore");
       if (gi)
         {
-          sprintf (gi, "%s/.gitignore", dir);
-          fz_rules_load (&lvl, gi);
+          sprintf (gi, "%s/.gitignore", job->full);
+          fz_rules_load (&node->lvl, gi);
           free (gi);
         }
-      if (lvl.dir_len == 0)
+      if (job->rel[0] == '\0')
         {
-          char *ex = malloc (dirlen0 + sizeof "/.git/info/exclude");
+          char *ex = malloc (dirlen + sizeof "/.git/info/exclude");
           if (ex)
             {
-              sprintf (ex, "%s/.git/info/exclude", dir);
-              fz_rules_load (&lvl, ex);
+              sprintf (ex, "%s/.git/info/exclude", job->full);
+              fz_rules_load (&node->lvl, ex);
               free (ex);
             }
         }
     }
-  if (ix->ign_depth == ix->ign_cap)
-    {
-      size_t newcap = ix->ign_cap ? ix->ign_cap * 2 : 16;
-      fz_rule_level *n = realloc (ix->ign, newcap * sizeof *n);
-      if (!n)
-        {
-          fz_rules_free (&lvl);
-          closedir (d);
-          return -1;
-        }
-      ix->ign = n;
-      ix->ign_cap = newcap;
-    }
-  ix->ign[ix->ign_depth++] = lvl;
 
-  struct dirent *de;
   int rc = 0;
+  struct dirent *de;
   while ((de = readdir (d)) != NULL)
     {
       if (atomic_load (&ix->cancel))
@@ -501,59 +600,211 @@ fz_scan (fz_index *ix, const char *dir, const char *rel)
       if (strcmp (name, ".git") == 0)
         continue;
 
-      size_t dirlen = strlen (dir);
+      size_t dirlen = strlen (job->full);
+      size_t rellen = strlen (job->rel);
       size_t namelen = strlen (name);
       char *full = malloc (dirlen + 1 + namelen + 1);
-      if (!full)
-        {
-          rc = -1;
-          break;
-        }
-      memcpy (full, dir, dirlen);
-      full[dirlen] = '/';
-      memcpy (full + dirlen + 1, name, namelen + 1);
-
-      size_t rellen = strlen (rel);
       char *newrel = malloc (rellen + (rellen ? 1 : 0) + namelen + 1);
-      if (!newrel)
+      if (!full || !newrel)
         {
           free (full);
+          free (newrel);
           rc = -1;
           break;
         }
+      memcpy (full, job->full, dirlen);
+      full[dirlen] = '/';
+      memcpy (full + dirlen + 1, name, namelen + 1);
       if (rellen)
         {
-          memcpy (newrel, rel, rellen);
+          memcpy (newrel, job->rel, rellen);
           newrel[rellen] = '/';
           memcpy (newrel + rellen + 1, name, namelen + 1);
         }
       else
         memcpy (newrel, name, namelen + 1);
 
-      struct stat st;
-      if (stat (full, &st) == 0)
+      /* The entry type comes from dirent when the filesystem provides
+         it, saving one stat(2) per entry; otherwise (and for
+         symlinks, whose targets we follow) stat is the fallback.  */
+      bool is_dir, is_reg;
+#ifdef _DIRENT_HAVE_D_TYPE
+      if (de->d_type == DT_DIR)
         {
-          bool is_dir = S_ISDIR (st.st_mode) != 0;
-          if (fz_ignored (ix, newrel, is_dir))
-            rc = 0;
-          else if (is_dir)
-            rc = fz_scan (ix, full, newrel);
-          else if (S_ISREG (st.st_mode))
+          is_dir = true;
+          is_reg = false;
+        }
+      else if (de->d_type == DT_REG)
+        {
+          is_dir = false;
+          is_reg = true;
+        }
+      else
+#endif
+        {
+          struct stat st;
+          if (stat (full, &st) != 0)
             {
-              /* Skip names that are not valid UTF-8: they cannot be
-                 passed to Lisp strings through the module API.  */
-              if (fz_utf8_valid (newrel, strlen (newrel)))
-                rc = fz_index_add (ix, newrel, strlen (newrel));
+              free (full);
+              free (newrel);
+              continue;
+            }
+          is_dir = S_ISDIR (st.st_mode) != 0;
+          is_reg = S_ISREG (st.st_mode) != 0;
+        }
+
+      if (fz_ignored (node, newrel, is_dir) || (!is_dir && !is_reg))
+        {
+          free (full);
+          free (newrel);
+        }
+      else if (is_dir)
+        {
+          fz_ign_acquire (node);
+          fz_scan_job child = { full, newrel, node };
+          if (fz_jobs_push (children, &child) != 0)
+            {
+              fz_scan_job_free (&child);
+              rc = -1;
             }
         }
-      free (full);
-      free (newrel);
-      if (rc)
-        break;
+      else if (fz_utf8_valid (newrel, strlen (newrel)))
+        {
+          pthread_mutex_lock (&ix->add_mu);
+          int arc = fz_index_add (ix, newrel, strlen (newrel));
+          pthread_mutex_unlock (&ix->add_mu);
+          free (full);
+          free (newrel);
+          if (arc != 0)
+            rc = -1;
+        }
+      else
+        {
+          /* Names that are not valid UTF-8 cannot be passed to Lisp
+             strings through the module API; skip them.  */
+          free (full);
+          free (newrel);
+        }
     }
-  fz_rules_free (&ix->ign[--ix->ign_depth]);
+  fz_ign_release (node);
   closedir (d);
   return rc;
+}
+
+static void *
+fz_scan_worker (void *arg)
+{
+  fz_scan_ctx *sc = arg;
+  fz_scan_jobs children = { 0 };
+  for (;;)
+    {
+      pthread_mutex_lock (&sc->mu);
+      while (!sc->stopping && sc->queue.n == 0 && sc->active > 0)
+        pthread_cond_wait (&sc->cv, &sc->mu);
+      if (sc->stopping || sc->queue.n == 0)
+        {
+          pthread_mutex_unlock (&sc->mu);
+          break;
+        }
+      fz_scan_job job = sc->queue.v[--sc->queue.n];
+      sc->active++;
+      pthread_mutex_unlock (&sc->mu);
+
+      children.n = 0;
+      int rc = fz_scan_dir (sc, &job, &children);
+
+      pthread_mutex_lock (&sc->mu);
+      if (rc != 0)
+        {
+          if (sc->rc == 0)
+            sc->rc = rc;
+          sc->stopping = true;
+        }
+      for (size_t i = 0; i < children.n; i++)
+        if (sc->stopping || fz_jobs_push (&sc->queue, &children.v[i]) != 0)
+          {
+            /* Winding down, or the queue allocation failed (fatal):
+               free this and the remaining children.  */
+            for (size_t k = i; k < children.n; k++)
+              fz_scan_job_free (&children.v[k]);
+            if (!sc->stopping)
+              {
+                sc->rc = -1;
+                sc->stopping = true;
+              }
+            break;
+          }
+      sc->active--;
+      /* Wake both idle workers (new jobs, or none left) and anyone
+         waiting for the queue to drain.  */
+      pthread_cond_broadcast (&sc->cv);
+      pthread_mutex_unlock (&sc->mu);
+      fz_scan_job_free (&job);
+    }
+  free (children.v);
+  return NULL;
+}
+
+/* Number of online processors, portably.  */
+static size_t
+fz_nproc (void)
+{
+#ifdef _WIN32
+  SYSTEM_INFO si;
+  GetSystemInfo (&si);
+  return si.dwNumberOfProcessors;
+#else
+  long n = sysconf (_SC_NPROCESSORS_ONLN);
+  return n > 0 ? (size_t) n : 1;
+#endif
+}
+
+/* Scan the index root with a pool of worker threads fed by the shared
+   directory queue, and join them all.  Directory scanning stops
+   scaling well past ~8 workers (the queue lock and the filesystem
+   become the bottleneck), so the pool is capped there.  Returns 0,
+   -1, or -2; see fz_scan_dir.  */
+static int
+fz_run_scan (fz_index *ix)
+{
+  fz_scan_ctx sc;
+  memset (&sc, 0, sizeof sc);
+  sc.ix = ix;
+  pthread_mutex_init (&sc.mu, NULL);
+  pthread_cond_init (&sc.cv, NULL);
+
+  fz_scan_job root = { strdup (ix->root), strdup (""), NULL };
+  if (!root.full || !root.rel || fz_jobs_push (&sc.queue, &root) != 0)
+    {
+      fz_scan_job_free (&root);
+      pthread_cond_destroy (&sc.cv);
+      pthread_mutex_destroy (&sc.mu);
+      return -1;
+    }
+
+  size_t nth = fz_nproc ();
+  if (nth > 8)
+    nth = 8;
+  pthread_t th[8];
+  size_t started;
+  for (started = 0; started < nth; started++)
+    if (pthread_create (&th[started], NULL, fz_scan_worker, &sc) != 0)
+      break;
+  if (started == 0)
+    /* Thread creation failed: scan on the calling thread instead.  */
+    fz_scan_worker (&sc);
+  else
+    for (size_t i = 0; i < started; i++)
+      pthread_join (th[i], NULL);
+
+  /* Jobs still queued (only when winding down early) are freed here;
+     finished jobs were freed by their workers.  */
+  for (size_t i = 0; i < sc.queue.n; i++)
+    fz_scan_job_free (&sc.queue.v[i]);
+  free (sc.queue.v);
+  pthread_cond_destroy (&sc.cv);
+  pthread_mutex_destroy (&sc.mu);
+  return sc.rc;
 }
 
 /* ------------------------------------------------------------------ */
@@ -919,20 +1170,6 @@ heap_offer (fz_hit *heap, size_t *nhits, size_t limit, fz_hit h,
 
 #define FZ_MAX_THREADS 16
 
-/* Number of online processors, portably.  */
-static size_t
-fz_nproc (void)
-{
-#ifdef _WIN32
-  SYSTEM_INFO si;
-  GetSystemInfo (&si);
-  return si.dwNumberOfProcessors;
-#else
-  long n = sysconf (_SC_NPROCESSORS_ONLN);
-  return n > 0 ? (size_t) n : 1;
-#endif
-}
-
 typedef struct
 {
   const fz_index *ix;
@@ -1031,7 +1268,7 @@ fz_build_worker (void *arg)
   pthread_sigmask (SIG_BLOCK, &set, NULL);
 #endif
   fz_index *ix = arg;
-  int rc = fz_scan (ix, ix->root, "");
+  int rc = fz_run_scan (ix);
   atomic_store (&ix->state, rc == 0 ? FZ_READY : FZ_FAILED);
   if (ix->pipe_fd >= 0)
     {
@@ -1094,7 +1331,7 @@ Ffz_index_build (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
   else
     {
       /* Thread creation failed: scan synchronously instead.  */
-      if (fz_scan (ix, root, "") != 0)
+      if (fz_run_scan (ix) != 0)
         {
           fz_index_free (ix);
           env->non_local_exit_signal (env, env->intern (env, "error"),

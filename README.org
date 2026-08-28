@@ -97,8 +97,9 @@ under MSYS2).
   =fz-index-completion-table= exposes the engine for custom
   integrations (see the docstring)
 
-Indexing runs on a background thread and honors =.gitignore=
-(including per-directory files and =.git/info/exclude=).  Indexes are
+Indexing walks the directory tree with a pool of worker threads fed
+by a shared work queue (fd-style parallel traversal) and honors
+=.gitignore= (including per-directory files and =.git/info/exclude=).  Indexes are
 persisted under =user-emacs-directory/fz-index/= and served
 stale-while-revalidate style: the first search of a session starts
 from the cache instantly while a background rescan refreshes it
@@ -142,5 +143,5 @@ makes it sensitive.
 
 | operation     | time      |
 |---------------+-----------|
-| cold index    | ~0.7 s    |
+| cold index    | ~0.1 s    |
 | per-keystroke | 24–38 ms  |
