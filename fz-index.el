@@ -217,7 +217,11 @@ When a cache file exists, its index is returned immediately and a
 background rescan replaces it once finished
 (stale-while-revalidate).  Otherwise a background scan builds the
 index; a pipe process filter updates any active `fz-index-open-file'
-session when the index becomes ready."
+session when the index becomes ready.  Remote (TRAMP) directories
+are not supported: the module indexes the local filesystem only."
+  (when (file-remote-p root)
+    (user-error "fz-index: cannot index remote directory %s (TRAMP is not supported)"
+                root))
   (or (gethash root fz-index--indexes)
       (let* ((proc (make-pipe-process
                     :name (format "fz-index:%s" root)
