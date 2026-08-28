@@ -132,7 +132,8 @@ used as the base.  Cleared by `fz-index-reset'."
   "Overlay highlighting the selected candidate.")
 
 (defvar fz-index--action 'open
-  "Action to take on the selected candidate: `open' or `insert-path'.")
+  "Action on the selected candidate: `open', `open-other-window'
+or `insert-path'.")
 
 (defvar fz-index--origin-window nil
   "Window that was selected when `fz-index-open-file' was invoked.")
@@ -150,6 +151,17 @@ used as the base.  Cleared by `fz-index-reset'."
   "Exit the minibuffer, requesting insertion of the path at point."
   (interactive)
   (setq fz-index--action 'insert-path)
+  (exit-minibuffer))
+
+(defun fz-index--exit-action ()
+  "Exit the minibuffer, confirming the selected candidate.
+With a prefix argument (C-u RET), open it in another window.
+Recording the choice in `fz-index--action' here (inside the command,
+where `current-prefix-arg' is still live) keeps it reliable after
+`read-from-minibuffer' has returned."
+  (interactive)
+  (setq fz-index--action
+        (if current-prefix-arg 'open-other-window 'open))
   (exit-minibuffer))
 
 (defun fz-index--root ()
@@ -301,6 +313,7 @@ Rebuild happens on the next `fz-index-open-file'."
     (define-key keymap (kbd "M-<down>") #'fz-index--next)
     (define-key keymap (kbd "M-<up>") #'fz-index--prev)
     (define-key keymap (kbd "M-RET") #'fz-index--insert-path-action)
+    (define-key keymap (kbd "RET") #'fz-index--exit-action)
     (define-key keymap (kbd "C-l") #'fz-index--toggle-preview)
     (define-key keymap (kbd "TAB") #'fz-index--complete)
     (define-key keymap (kbd "C-o") #'fz-index--focus-results)
@@ -324,23 +337,25 @@ Rebuild happens on the next `fz-index-open-file'."
                 (message "fz: no candidate selected")
               (let* ((rel (car (nth fz-index--selected fz-index--candidates)))
                      (abs (expand-file-name rel root)))
-                (cond
-                 ((eq fz-index--action 'insert-path)
-                  (with-current-buffer origin-buffer
-                    (insert rel)))
-                 (current-prefix-arg
-                  (fz-index--record abs)
-                  (find-file-other-window abs)
-                  ;; Abs's buffer may be a preview buffer now in
-                  ;; use; don't let the cleanup below kill it.
-                  (setq fz-index--preview-buffers
-                        (delq (get-file-buffer abs) fz-index--preview-buffers)))
-                 (t
-                  (fz-index--record abs)
-                  (setq opened t)
-                  (find-file abs)
-                  (setq fz-index--preview-buffers
-                        (delq (get-file-buffer abs) fz-index--preview-buffers))))))))
+                (pcase fz-index--action
+                  ('insert-path
+                   (with-current-buffer origin-buffer
+                     (insert rel)))
+                  ('open-other-window
+                   (fz-index--record abs)
+                   (find-file-other-window abs)
+                   ;; Abs's buffer may be a preview buffer now in
+                   ;; use; don't let the cleanup below kill it.
+                   (setq fz-index--preview-buffers
+                         (delq (get-file-buffer abs)
+                               fz-index--preview-buffers)))
+                  (_
+                   (fz-index--record abs)
+                   (setq opened t)
+                   (find-file abs)
+                   (setq fz-index--preview-buffers
+                         (delq (get-file-buffer abs)
+                               fz-index--preview-buffers))))))))
       ;; Restore the origin window unless the user opened a file in it.
       (unless opened
         (when (window-live-p fz-index--origin-window)
@@ -412,20 +427,24 @@ The result has the same (RELATIVE-PATH SCORE POSITIONS) shape as
   (interactive "e")
   (let ((line (1- (line-number-at-pos (posn-point (event-start event))))))
     (when (and fz-index--candidates (< line (length fz-index--candidates)))
-      (setq fz-index--selected line)
+      (setq fz-index--selected line
+            fz-index--action 'open)
       (fz-index--highlight-selection)
       (exit-minibuffer))))
 
 (defun fz-index--results-open ()
   "Select the candidate on the current line and confirm it.
 Like `fz-index--results-click', but for the keyboard: after moving to the
-results buffer (C-o or C-x o), RET opens the file on the current line.
+results buffer (C-o or C-x o), RET opens the file on the current line;
+with a prefix argument (C-u RET) it opens in another window.
 The actual open is done by the `fz-index-open-file' session after the
 minibuffer exits.  Lines without a candidate do nothing."
   (interactive)
   (let ((line (1- (line-number-at-pos))))
     (when (and fz-index--candidates (< line (length fz-index--candidates)))
-      (setq fz-index--selected line)
+      (setq fz-index--selected line
+            fz-index--action
+            (if current-prefix-arg 'open-other-window 'open))
       (fz-index--highlight-selection)
       (exit-minibuffer))))
 
@@ -621,6 +640,68 @@ session ends (except one the user actually opened)."
                     (dedicated . t)))))
     (when win
       (set-window-parameter win 'no-delete-other-windows t))))
+
+;;; Completing-read integration
+
+(defun fz-index--style-try (_string _table _pred _point)
+  "Never expand the input; the fz-index style only filters."
+  nil)
+
+(defun fz-index--style-all (string table pred _point)
+  "Return TABLE's candidates for STRING without further filtering.
+The fz-index table already fuzzy-matched, scored and sorted them."
+  (let ((res (funcall table string pred 'all-completions)))
+    ;; Like the basic style, terminate the list with a 0 cdr.
+    (if (consp res)
+        (nconc res 0)
+      res)))
+
+(add-to-list 'completion-styles-alist
+             '(fz-index fz-index--style-try fz-index--style-all
+               "Fuzzy matching done by the fz-index table itself."))
+
+;;;###autoload
+(defun fz-index-completion-table (root)
+  "Return a completion table that fuzzy-searches files under ROOT.
+Candidates are relative paths, already fuzzy-matched, scored and
+sorted by the native index.  Use it with `completion-styles' bound
+to (fz-index) so the completion styles do not filter the candidates
+again.  While the index is still building, the table is empty."
+  (fz-index-ensure-module)
+  (lambda (string _pred action)
+    (cond
+     ((eq action 'metadata)
+      '(metadata (category . fz-index)
+                 (display-sort-function . identity)
+                 (cycle-sort-function . identity)))
+     ((eq action 'lambda)
+      nil)
+     ((or (eq action t) (eq action 'all-completions))
+      (let ((handle (fz-index--index-for root)))
+        (if (fz-index-ready-p handle)
+            (mapcar #'car (fz-query handle string fz-index-query-limit))
+          nil)))
+     ((null action)
+      ;; try-completion: the input is never expanded.
+      string)
+     (t nil))))
+
+;;;###autoload
+(defun fz-index-read-file (&optional prompt)
+  "Fuzzy-find and open a file via `completing-read'.
+Unlike `fz-index-open-file' with its own UI, this goes through the
+standard completion machinery, so it works with whatever completion
+framework you use (vertico, icomplete, fido, the default UI, ...).
+The base directory is the same one `fz-index-open-file' would use."
+  (interactive)
+  (fz-index-ensure-module)
+  (let* ((root (fz-index--root))
+         (completion-styles '(fz-index))
+         (rel (completing-read
+               (or prompt (format "fz [%s]: " root))
+               (fz-index-completion-table root))))
+    (when (and rel (not (string-empty-p rel)))
+      (find-file (expand-file-name rel root)))))
 
 ;;; Module loading
 

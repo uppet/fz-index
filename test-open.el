@@ -13,7 +13,9 @@
 (let* ((root (file-name-as-directory (expand-file-name default-directory)))
        (abs (expand-file-name "fz-index.el" root))
        (fz-index--history (make-hash-table :test 'equal))
-       (fz-index-preview-enabled t))
+       (fz-index-preview-enabled t)
+       (user-emacs-directory "/tmp/fz-open-uem/"))
+  (make-directory user-emacs-directory t)
   (puthash abs 3 fz-index--history)
   (cl-letf (((symbol-function 'minibuffer-contents) (lambda () ""))
             ((symbol-function 'run-with-idle-timer)
@@ -68,3 +70,5 @@
       (unless (= fz-index--selected 0)
         (error "BUG: results-open moved selection on out-of-range line"))))
   (princ "results-open tests passed\n"))
+
+(delete-directory "/tmp/fz-open-uem" t)

@@ -3,6 +3,10 @@
 (load (expand-file-name "./fz-index.elc") nil t)
 (require 'cl-lib)
 
+;; Keep the on-disk index cache out of the real user directory.
+(setq user-emacs-directory "/tmp/fz-flow-uem/")
+(make-directory user-emacs-directory t)
+
 ;; Batch read-from-minibuffer reads stdin and never runs the setup
 ;; hook, so mock it: run the setup hook (initial update), then replay
 ;; "type QUERY, move down MOVES times" and return the input, as RET
@@ -60,3 +64,4 @@
 (delete-directory "/tmp/fz-index-flow/sub")
 (delete-directory "/tmp/fz-index-flow")
 (princ "ui flow tests done\n")
+(delete-directory "/tmp/fz-flow-uem" t)
