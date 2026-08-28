@@ -527,6 +527,9 @@ is_separator (char c)
 }
 
 #define FZ_MAX_PATTERN 1024
+/* A query is split into at most this many space-separated words; any
+   remainder is lumped (spaces included) into the final word.  */
+#define FZ_MAX_WORDS 32
 
 /* memrchr with a portable fallback.  */
 static const char *
@@ -647,6 +650,28 @@ fz_score (const char *pat, size_t plen, const char *str,
   return best;
 }
 
+/* Score STR against every one of the NWORDS query words: all of them
+   must match, and the total score is the sum of the per-word scores.
+   This implements Sublime/fzf-style multi-word queries ("foo bar"
+   matches paths matching both "foo" and "bar").  */
+static int
+fz_score_multi (const char **words, const size_t *wlens, size_t nwords,
+                const char *str, const char *lower, size_t len,
+                bool case_insens)
+{
+  if (nwords == 0)
+    return -(int) len;
+  int total = 0;
+  for (size_t w = 0; w < nwords; w++)
+    {
+      int s = fz_score (words[w], wlens[w], str, lower, len, case_insens);
+      if (s == NO_MATCH)
+        return NO_MATCH;
+      total += s;
+    }
+  return total;
+}
+
 /* ------------------------------------------------------------------ */
 /* Top-K heap (min-heap by score; ties prefer shorter paths)           */
 /* ------------------------------------------------------------------ */
@@ -753,8 +778,9 @@ fz_nproc (void)
 typedef struct
 {
   const fz_index *ix;
-  const char *pat;
-  size_t plen;
+  const char **words;           /* query words (NUL-terminated) */
+  const size_t *wlens;
+  size_t nwords;
   bool case_insens;
   const uint32_t *pool;         /* candidate entry indices, or NULL
                                    meaning "the whole index" */
@@ -776,9 +802,9 @@ fz_query_worker (void *arg)
     {
       uint32_t ei = s->pool ? s->pool[i] : (uint32_t) i;
       uint32_t off = ix->offs[ei];
-      int score = fz_score (s->pat, s->plen, ix->paths + off,
-                            ix->lower + off, ix->lens[ei],
-                            s->case_insens);
+      int score = fz_score_multi (s->words, s->wlens, s->nwords,
+                                  ix->paths + off, ix->lower + off,
+                                  ix->lens[ei], s->case_insens);
       if (score == NO_MATCH)
         continue;
       heap_offer (s->heap, &s->nhits, s->limit,
@@ -1019,14 +1045,61 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
         nthreads = ncpu > FZ_MAX_THREADS ? FZ_MAX_THREADS : ncpu;
     }
 
+  /* Split the pattern into space-separated words: "foo bar" matches
+     paths matching both words, like Sublime and fzf.  WORDS_BUF holds
+     NUL-terminated copies; PAT_LOWER keeps the original spacing for
+     the narrowing-cache comparison.  */
+  char *words_buf = malloc (plen);
+  if (!words_buf)
+    {
+      free (pattern);
+      if (pat_lower != pattern)
+        free (pat_lower);
+      return env->intern (env, "nil");
+    }
+  memcpy (words_buf, pat_lower, plen);
+  const char *words[FZ_MAX_WORDS];
+  size_t wlens[FZ_MAX_WORDS];
+  size_t nwords = 0;
+  {
+    char *p = words_buf;
+    char *wend = words_buf + (plen - 1);   /* PLEN includes the NUL */
+    while (p < wend && nwords < FZ_MAX_WORDS - 1)
+      {
+        while (p < wend && *p == ' ')
+          p++;
+        if (p >= wend)
+          break;
+        char *start = p;
+        while (p < wend && *p != ' ')
+          p++;
+        words[nwords] = start;
+        wlens[nwords] = (size_t) (p - start);
+        nwords++;
+        if (p < wend)
+          *p++ = '\0';
+      }
+    while (p < wend && *p == ' ')
+      p++;
+    if (p < wend)
+      {
+        /* Too many words: lump the rest (spaces included) into the
+           final word.  */
+        words[nwords] = p;
+        wlens[nwords] = (size_t) (wend - p);
+        nwords++;
+      }
+  }
+
   fz_query_slice slices[FZ_MAX_THREADS];
   pthread_t threads[FZ_MAX_THREADS];
   size_t per = (pool_count + nthreads - 1) / nthreads;
   for (size_t t = 0; t < nthreads; t++)
     {
       slices[t].ix = ix;
-      slices[t].pat = pat_lower;
-      slices[t].plen = (size_t) (plen - 1);
+      slices[t].words = words;
+      slices[t].wlens = wlens;
+      slices[t].nwords = nwords;
       slices[t].case_insens = case_insens;
       slices[t].pool = pool;
       slices[t].begin = t * per;
@@ -1043,6 +1116,7 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
         {
           for (size_t u = 0; u < t; u++)
             free (slices[u].heap);
+          free (words_buf);
           free (pattern);
           if (pat_lower != pattern)
             free (pat_lower);
@@ -1100,6 +1174,7 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
     {
       for (size_t t = 0; t < nthreads; t++)
         free (slices[t].heap);
+      free (words_buf);
       free (pattern);
       if (pat_lower != pattern)
         free (pat_lower);
@@ -1145,6 +1220,7 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
     }
 
   free (heap);
+  free (words_buf);
   free (pattern);
   if (pat_lower != pattern)
     free (pat_lower);
