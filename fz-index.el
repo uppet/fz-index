@@ -904,22 +904,89 @@ Releases page."
       ('darwin (and arch (format "%s-macos" arch)))
       (_ nil))))
 
-(defun fz-index--fetch (url)
-  "Return the body of URL as a unibyte string, or nil on failure."
+(defun fz-index--format-size (n)
+  "Format byte count N for display in the echo area."
+  (cond ((< n 1024) (format "%dB" n))
+        ((< n (* 1024 1024)) (format "%.1fkB" (/ n 1024.0)))
+        (t (format "%.1fMB" (/ n 1024.0 1024.0)))))
+
+(defun fz-index--transfer-buffer ()
+  "Return the url.el HTTP buffer currently receiving a transfer.
+url.el follows redirects by starting the new request in a fresh
+buffer, so the newest buffer named \" *http ...\" is the one whose
+body bytes are growing.  Return nil when no transfer is in flight."
+  (car (delq nil (mapcar (lambda (buf)
+                           (and (string-match-p "\\` \\*http "
+                                                (buffer-name buf))
+                                buf))
+                         (buffer-list)))))
+
+(defun fz-index--fetch (url &optional label)
+  "Return the body of URL as a unibyte string, or nil on failure.
+When LABEL is non-nil, it shows in the echo area with byte counts
+while the transfer runs; url.el gives no progress of its own for
+`url-retrieve-synchronously', so a timer polls the transfer buffer."
   (require 'url)
-  (condition-case nil
-      (let ((buf (url-retrieve-synchronously url t t 60)))
-        (when buf
-          (with-current-buffer buf
-            (set-buffer-multibyte nil)
-            (goto-char (point-min))
-            (if (not (looking-at-p "HTTP/[0-9.]+ 2[0-9][0-9]"))
-                (progn (kill-buffer buf) nil)
-              (re-search-forward "\r?\n\r?\n")
-              (prog1 (buffer-substring (point) (point-max))
-                (kill-buffer buf))))))
-    (error (message "fz-index: fetching %s failed" url)
-           nil)))
+  (let* ((tracked nil)               ; buffer the last tick looked at
+         (total nil)                 ; Content-Length, once headers arrive
+         (reporter nil)
+         (last-msg 0.0)
+         (tick (lambda ()
+                 (when-let* ((buf (fz-index--transfer-buffer)))
+                   ;; A redirect swaps buffers; restart the meter so
+                   ;; the 302's headers are not mistaken for the file.
+                   (unless (eq buf tracked)
+                     (setq tracked buf total nil reporter nil))
+                   (with-current-buffer buf
+                     (goto-char (point-min))
+                     (when (re-search-forward "\r?\n\r?\n" nil t)
+                       (let* ((header-end (match-beginning 0))
+                              (received (- (point-max) header-end)))
+                         (unless total
+                           (setq total
+                                 (if (save-excursion
+                                       (goto-char (point-min))
+                                       (re-search-forward
+                                        "^\\([Cc]ontent-[Ll]ength\\):[ \t]*\\([0-9]+\\)"
+                                        header-end t))
+                                     (string-to-number (match-string 2))
+                                   0)))
+                         (if (> total 0)
+                             (progn
+                               (unless reporter
+                                 (setq reporter
+                                       (make-progress-reporter label 0 total)))
+                               (progress-reporter-update
+                                reporter (min received total)))
+                           ;; No Content-Length: a plain byte count,
+                           ;; throttled so *Messages* is not flooded.
+                           (when (> (- (float-time) last-msg) 0.3)
+                             (setq last-msg (float-time))
+                             (message "%s... %s" label
+                                      (fz-index--format-size received))))))))))
+         (timer (when label (run-at-time 0.1 0.1 tick))))
+    (let (body)
+      (unwind-protect
+          (setq body
+                (condition-case nil
+                    (let ((buf (url-retrieve-synchronously url t t 60)))
+                      (when buf
+                        (with-current-buffer buf
+                          (set-buffer-multibyte nil)
+                          (goto-char (point-min))
+                          (if (not (looking-at-p "HTTP/[0-9.]+ 2[0-9][0-9]"))
+                              (progn (kill-buffer buf) nil)
+                            (re-search-forward "\r?\n\r?\n")
+                            (prog1 (buffer-substring (point) (point-max))
+                              (kill-buffer buf))))))
+                  (error (message "fz-index: fetching %s failed" url)
+                         nil)))
+        (when timer (cancel-timer timer))
+        ;; "... done" only when it really did; on failure the next
+        ;; step's message takes over the echo area instead.
+        (when (and reporter body)
+          (progress-reporter-done reporter)))
+      body)))
 
 (defun fz-index--download-module (dest)
   "Download the prebuilt module for this platform to DEST.
@@ -929,7 +996,8 @@ with the release.  Returns non-nil on success."
               (base (format "https://github.com/uppet/fz-index/releases/download/v%s"
                             fz-index-version))
               (name (format "fz-index-%s%s" platform module-file-suffix))
-              (bin (fz-index--fetch (concat base "/" name)))
+              (bin (fz-index--fetch (concat base "/" name)
+                                    (format "fz-index: downloading %s" name)))
               (sums (fz-index--fetch (concat base "/checksums.txt"))))
     (if (not (string-match (format "^\\([0-9a-f]\\{64\\}\\) +%s$"
                                    (regexp-quote name))
@@ -960,7 +1028,10 @@ with the release.  Returns non-nil on success."
 
 (defun fz-index--build-module (dest)
   "Compile the bundled fz-index.c into DEST.
-Returns non-nil on success."
+Returns non-nil on success.  The compiler runs asynchronously so
+its output can collect in the *fz-index-build* buffer while
+elapsed time ticks in the echo area; with `call-process' Emacs
+froze with no feedback for the whole compile."
   (let ((src (expand-file-name "fz-index.c" fz-index--directory))
         (cc (or (executable-find "gcc") (executable-find "clang")
                 (executable-find "cc"))))
@@ -973,13 +1044,37 @@ Returns non-nil on success."
                                 (expand-file-name "fz-index.c"
                                                   fz-index--directory)
                                 "-I" fz-index--directory "-lpthread")))
-            (buf (get-buffer-create " *fz-index-build*")))
-        (if (not (zerop (apply #'call-process cc nil buf nil args)))
-            (progn (message "fz-index: build failed, see buffer %s"
-                            (buffer-name buf))
-                   nil)
-          (message "fz-index: module compiled")
-          t)))))
+            (buf (get-buffer-create " *fz-index-build*"))
+            (start (float-time))
+            (last-msg 0.0))
+        (with-current-buffer buf (erase-buffer))
+        (let ((proc (make-process :name "fz-index-build"
+                                  :buffer buf
+                                  :command (cons cc args)
+                                  :connection-type 'pipe
+                                  :noquery t)))
+          (unwind-protect
+              (while (process-live-p proc)
+                (if (> (- (float-time) start) 120)
+                    (progn (message "fz-index: compile timed out")
+                           (delete-process proc))
+                  (when (> (- (float-time) last-msg) 0.5)
+                    (setq last-msg (float-time))
+                    (message "fz-index: compiling module ... %.1fs"
+                             (- (float-time) start)))
+                  ;; sit-for, not sleep-for: the echo area only
+                  ;; refreshes on redisplay.
+                  (sit-for 0.2)))
+            (when (process-live-p proc)
+              ;; Quit or error mid-compile: kill gcc rather than leave
+              ;; it writing to DEST in the background.
+              (delete-process proc)))
+          (if (not (zerop (process-exit-status proc)))
+              (progn (message "fz-index: build failed, see buffer %s"
+                              (buffer-name buf))
+                     nil)
+            (message "fz-index: module compiled")
+            t))))))
 
 (defun fz-index--load-module-file (file)
   "Load module FILE; on failure return nil.
@@ -1035,12 +1130,23 @@ install the module ahead of time."
         ;; Download the prebuilt binary or compile the bundled source;
         ;; if either produces a module that still fails to load, the
         ;; file is deleted and the other source is tried.
-        (or (and (fz-index--download-module file)
+        (if (and (fz-index--download-module file)
                  (fz-index--load-module-file file))
-            (and (fz-index--build-module file)
-                 (fz-index--load-module-file file))
-            (user-error "fz-index: no prebuilt module for this platform \
-and no usable C compiler; see https://github.com/uppet/fz-index"))))))))
+            t
+          (let ((built (fz-index--build-module file)))
+            (if (and built (fz-index--load-module-file file))
+                t
+              ;; The reason differs: nothing produced a module, or a
+              ;; module was built but this Emacs cannot load it (the
+              ;; load error itself is messaged by
+              ;; `fz-index--load-module-file').
+              (user-error "fz-index: module installation failed (%s); \
+see https://github.com/uppet/fz-index"
+                          (if built
+                              "the module was built but this Emacs \
+cannot load it"
+                            "no prebuilt module for this platform and \
+no usable C compiler")))))))))))
 
 (provide 'fz-index)
 ;;; fz-index.el ends here
