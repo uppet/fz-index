@@ -115,6 +115,42 @@
     (error "BUG: fz-index-read-file did not record the open"))
   (princ "history/frecency tests passed\n"))
 
+;; Oversampling: a favorite whose raw score ranks beyond the display
+;; limit must still surface when its frecency boost is large, and the
+;; candidate list must trim back to `fz-index-query-limit'.  121
+;; files all match "f"; the boosted one has the longest path, so its
+;; raw score is the worst of the lot.
+(let ((user-emacs-directory "/tmp/fz-os-uem/")
+      (table (fz-index-completion-table "/tmp/fz-os/"))
+      (deadline (+ (float-time) 30)))
+  (make-directory "/tmp/fz-os/src" t)
+  (make-directory user-emacs-directory t)
+  (dotimes (i 120)
+    (write-region "" nil (format "/tmp/fz-os/src/f%03d.c" i) nil 'silent))
+  (write-region "" nil "/tmp/fz-os/src/m-favorite.c" nil 'silent)
+  (funcall table "x" nil 'all-completions)
+  (while (and (not (let ((h (gethash "/tmp/fz-os/" fz-index--indexes)))
+                     (and h (fz-index-ready-p h))))
+              (< (float-time) deadline))
+    (accept-process-output nil 0.05))
+  (let ((fz-index-frecency-boost 10000)
+        (fz-index-frecency-max-boost 10000))
+    (dotimes (_ 5)
+      (fz-index--record "/tmp/fz-os/src/m-favorite.c"))
+    (let ((res (funcall table "f" nil 'all-completions)))
+      (unless (= (length res) fz-index-query-limit)
+        (error "BUG: oversample trim => %d candidates" (length res)))
+      (unless (equal (car res) "src/m-favorite.c")
+        (error "BUG: boosted favorite not surfaced, first => %S"
+               (car res)))))
+  (let ((h (gethash "/tmp/fz-os/" fz-index--indexes)))
+    (when h (fz-index-destroy h)))
+  (clrhash fz-index--indexes)
+  (delete-directory "/tmp/fz-os/src" t)
+  (delete-directory "/tmp/fz-os" t)
+  (delete-directory "/tmp/fz-os-uem" t)
+  (princ "oversample tests passed\n"))
+
 (let ((h (gethash "/tmp/fz-ct/" fz-index--indexes)))
   (when h (fz-index-destroy h)))
 (clrhash fz-index--indexes)

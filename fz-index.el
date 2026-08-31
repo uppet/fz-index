@@ -177,11 +177,33 @@ where `current-prefix-arg' is still live) keeps it reliable after
         (if current-prefix-arg 'open-other-window 'open))
   (exit-minibuffer))
 
+(defcustom fz-index-root-function nil
+  "Function that returns the base directory to search, or nil.
+When non-nil, it is called with no arguments wherever a search
+starts, and its return value replaces the default choice of
+`fz-index-base-directory' or `default-directory'; returning nil
+falls back to that default.  A project-aware setup:
+
+  (setq fz-index-root-function
+        (lambda () (when-let ((project (project-current)))
+                     (project-root project))))
+
+When nil (the default), the manual `fz-index-open-set-base'
+behavior is kept.  An error signaled by the function propagates
+to the caller (usually `fz-index-open-file'), so a broken
+configuration is visible rather than silently ignored."
+  :type '(choice (const :tag "Manual base directory" nil) function))
+
 (defun fz-index--root ()
   "Return the base directory for `fz-index-open-file'.
-This is `fz-index-base-directory' when set, otherwise the current directory."
+`fz-index-root-function', when set, decides; otherwise this is
+`fz-index-base-directory' when set, otherwise the current directory."
   (file-name-as-directory
-   (expand-file-name (or fz-index-base-directory default-directory))))
+   (expand-file-name
+    (or (and fz-index-root-function
+             (funcall fz-index-root-function))
+        fz-index-base-directory
+        default-directory))))
 
 ;;;###autoload
 (defun fz-index-open-set-base (dir)
@@ -465,6 +487,27 @@ Rebuild happens on the next `fz-index-open-file'."
     (setq fz-index--selected (max (1- fz-index--selected) 0))
     (fz-index--highlight-selection)))
 
+(defcustom fz-index-query-oversample 3
+  "Fetch this many times `fz-index-query-limit' raw matches from
+`fz-query', so a frecency boost can pull an often-opened file back
+into the displayed list even when its raw score ranks below the
+raw cut.  The extra cost is C-side heap work; the displayed list is
+trimmed back to `fz-index-query-limit'."
+  :type 'natnum)
+
+(defun fz-index--query-candidates (handle input root)
+  "Query HANDLE for INPUT and return the displayed candidate list.
+Fetches `fz-index-query-oversample' times `fz-index-query-limit'
+raw matches, applies the frecency boost, then trims to
+`fz-index-query-limit'.  This is the candidate computation shared
+by the minibuffer UI and the completion table."
+  (seq-take (fz-index--apply-frecency
+             (fz-query handle input
+                       (* fz-index-query-oversample
+                          fz-index-query-limit))
+             root)
+            fz-index-query-limit))
+
 (defun fz-index--update ()
   "Re-query with the current minibuffer input and refresh results.
 Does nothing when the input has not changed since the last update,
@@ -476,10 +519,9 @@ With empty input, the most-opened files of this root are shown."
             fz-index--candidates
             (if (string-empty-p input)
                 (fz-index--history-candidates fz-index--root)
-              (fz-index--apply-frecency
-               (fz-query (gethash fz-index--root fz-index--indexes)
-                         input fz-index-query-limit)
-               fz-index--root))
+              (fz-index--query-candidates
+               (gethash fz-index--root fz-index--indexes)
+               input fz-index--root))
             fz-index--selected 0)
       (fz-index--render))))
 
@@ -846,9 +888,8 @@ again.  While the index is still building, the table is empty."
             nil
           (if (string-empty-p string)
               (mapcar #'car (fz-index--history-candidates root))
-            (mapcar #'car (fz-index--apply-frecency
-                           (fz-query handle string fz-index-query-limit)
-                           root))))))
+            (mapcar #'car (fz-index--query-candidates
+                           handle string root))))))
      ((null action)
       ;; try-completion: the input is never expanded.
       string)

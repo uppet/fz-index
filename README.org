@@ -94,6 +94,16 @@ https://github.com/uppet/fz-index/releases.
 - =M-x fz-index-open-set-base= — set the base directory (like
   Sublime's project folder); all later =fz-index-open-file= calls
   search from there.  Without it, the current directory is the base
+- Alternatively, set =fz-index-root-function= to a function that
+  returns the base directory automatically wherever a search starts
+  (returning nil falls back to the manual base / current directory),
+  e.g. for project-aware roots:
+
+  #+begin_src elisp
+  (setq fz-index-root-function
+        (lambda () (when-let ((project (project-current)))
+                     (project-root project))))
+  #+end_src
 - =M-x fz-index-open-file= — fuzzy-find a file under the base
   directory; with empty input, your most-opened files under the base
   are shown
@@ -123,8 +133,10 @@ https://github.com/uppet/fz-index/releases.
 - Opened files get a frecency bonus on later queries: log2-compressed
   open counts with a half-life decay on the last-open time
   (=fz-index-frecency-half-life=, default 7 days), so stale favorites
-  gradually lose their lead; history persists in
-  =fz-index-history-file=, and =fz-index-read-file= (the
+  gradually lose their lead.  Queries fetch several times the display
+  limit before ranking, so a strong bonus can pull a favorite back
+  into view even when its raw score ranks below the limit.  History
+  persists in =fz-index-history-file=, and =fz-index-read-file= (the
   completing-read entry point) feeds the same history
 - =M-p= / =M-n= browse your previous queries (minibuffer history)
 - =M-x fz-index-reset= — drop the cached index (rebuilt on next
