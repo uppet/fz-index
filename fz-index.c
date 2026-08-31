@@ -41,6 +41,20 @@
 
 #include "emacs-module.h"
 
+/* mingw's dirent rarely reports link entries and its lstat is an
+   alias of stat, so the symlink classification below degrades to the
+   old following behavior on Windows; POSIX gets a real lstat.  */
+#ifdef _WIN32
+# define fz_lstat stat
+# ifndef S_ISLNK
+/* mingw's sys/stat.h has no S_ISLNK: links are not distinguishable
+   there, so nothing ever classifies as one.  */
+#  define S_ISLNK(m) 0
+# endif
+#else
+# define fz_lstat lstat
+#endif
+
 int plugin_is_GPL_compatible;
 
 
@@ -540,7 +554,10 @@ typedef struct
    the index (under the add mutex), subdirectories are appended to
    CHILDREN.  Entries under any .git directory are always skipped;
    entries matched by the gitignore rule chain are skipped as well
-   (directories are pruned without descending).  Returns 0, -1 on
+   (directories are pruned without descending).  Symlinked
+   directories are not descended into (a loop, or a link out of the
+   tree, would otherwise keep the scan growing forever); symlinked
+   files are indexed.  Returns 0, -1 on
    fatal error (allocation failure or an unreadable root), or -2 if
    the scan was cancelled.  */
 static int
@@ -625,8 +642,11 @@ fz_scan_dir (fz_scan_ctx *sc, fz_scan_job *job, fz_scan_jobs *children)
         memcpy (newrel, name, namelen + 1);
 
       /* The entry type comes from dirent when the filesystem provides
-         it, saving one stat(2) per entry; otherwise (and for
-         symlinks, whose targets we follow) stat is the fallback.  */
+         it, saving one stat(2) per entry; DT_UNKNOWN entries and
+         symlinks are classified with lstat plus, for links, one
+         stat.  A symlinked directory never becomes a scan job: only
+         its target type is inspected, and a broken link is skipped
+         like any unreadable entry.  */
       bool is_dir, is_reg;
 #ifdef _DIRENT_HAVE_D_TYPE
       if (de->d_type == DT_DIR)
@@ -643,14 +663,23 @@ fz_scan_dir (fz_scan_ctx *sc, fz_scan_job *job, fz_scan_jobs *children)
 #endif
         {
           struct stat st;
-          if (stat (full, &st) != 0)
+          if (fz_lstat (full, &st) != 0)
             {
               free (full);
               free (newrel);
               continue;
             }
-          is_dir = S_ISDIR (st.st_mode) != 0;
-          is_reg = S_ISREG (st.st_mode) != 0;
+          if (S_ISLNK (st.st_mode))
+            {
+              is_dir = false;
+              is_reg = stat (full, &st) == 0
+                && S_ISREG (st.st_mode) != 0;
+            }
+          else
+            {
+              is_dir = S_ISDIR (st.st_mode) != 0;
+              is_reg = S_ISREG (st.st_mode) != 0;
+            }
         }
 
       if (fz_ignored (node, newrel, is_dir) || (!is_dir && !is_reg))

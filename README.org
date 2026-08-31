@@ -53,13 +53,41 @@ use, =fz-index-ensure-module= installs it automatically
 The checksum file is fetched from the same GitHub release as the
 binary, so this protects the download against corruption (truncated
 or re-encoded bytes) but is not a defense against a compromised
-release.  If that is a concern, set =fz-index-module-auto-install=
-to nil and build the module yourself with =make=.
+release.  See [[*Security and trust model]] for the full picture and
+how to opt out.
 
 Run =M-x fz-index-ensure-module= to install ahead of time, or build
 by hand with =make= (=make fz-index.dll= cross-compiles for Windows
 with =gcc-mingw-w64-x86-64=; the same source also builds natively
 under MSYS2).
+
+** Security and trust model
+
+Using =fz-index= loads native code into your Emacs process, so the
+trust question is worth stating plainly.
+
+1. *Prebuilt binaries.*  The =fz-index.so= / =.dylib= / =.dll=
+   downloaded from GitHub Releases is built by this project's CI
+   (GitHub Actions) from the committed =fz-index.c=, and verified
+   against the SHA-256 in =checksums.txt= published with the same
+   release.  The checksum protects against a corrupted or truncated
+   download, but it is *not* a defense against a compromised
+   release: anyone who could publish to the repository or its CI
+   could ship a binary and its matching checksum together.
+2. *Local compilation.*  The fallback compiles the bundled
+   =fz-index.c= with your system's gcc/clang.  This runs a compiler
+   you already trust, on source you can read, and is the most
+   auditable of the two paths.
+
+To avoid the automatic download entirely, set
+=fz-index-module-auto-install= to nil and build the module yourself
+with =make= (or =make fz-index.dll= on Windows);
+=fz-index-ensure-module= then only loads a module you placed next
+to =fz-index.el=.
+
+Releases are tagged =v<fz-index-version>=, built by the workflow in
+=.github/workflows/build.yml=, and published at
+https://github.com/uppet/fz-index/releases.
 
 * Usage
 
@@ -110,8 +138,13 @@ under MSYS2).
 
 Indexing walks the directory tree with a pool of worker threads fed
 by a shared work queue (fd-style parallel traversal) and honors
-=.gitignore= (including per-directory files and =.git/info/exclude=).  Indexes are
-persisted under =user-emacs-directory/fz-index/= and served
+=.gitignore= (including per-directory files and =.git/info/exclude=).
+Symlinked directories are not followed — a loop, or a link out of
+the tree, would otherwise keep the scan growing forever (matching
+=fd= and =rg=) — while symlinked files are indexed.  On Windows the
+mingw build cannot always tell links apart, so directory links and
+junctions may still be followed there.  Indexes are persisted under
+=user-emacs-directory/fz-index/= and served
 stale-while-revalidate style: the first search of a session starts
 from the cache instantly while a background rescan refreshes it
 (=fz-index-cache-enabled= to disable).  Live indexes older than

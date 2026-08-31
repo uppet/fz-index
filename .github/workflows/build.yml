@@ -32,8 +32,9 @@ jobs:
           emacs -Q --batch -L . -l fz-index-tests.el -f ert-run-tests-batch-and-exit
           for t in test-m3.el test-m4.el test-open.el test-ui-fix.el \
                    test-ui-flow.el test-multiword.el test-persist.el \
-                   test-refresh.el test-highlight.el test-completion-table.el \
-                   test-module-install.el test-fuzz.el; do
+                   test-refresh.el test-symlink.el test-highlight.el \
+                   test-completion-table.el test-module-install.el \
+                   test-fuzz.el; do
             echo "== $t"
             emacs -Q --batch -L . -l "$t"
           done
@@ -60,6 +61,11 @@ jobs:
           gcc -O1 -g -fsanitize=address,undefined
           -fno-omit-frame-pointer -std=c99 -fPIC -shared
           -o fz-index.so fz-index.c -lpthread
+      - name: Scanner ASan stress (symlink loop + cancel)
+        run: |
+          gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+              -std=c99 fz-asan-stress.c -o fz-asan-stress -lpthread
+          ASAN_OPTIONS=detect_leaks=0 ./fz-asan-stress
       - name: Byte-compile the UI
         run: emacs -Q --batch --eval '(byte-compile-file "fz-index.el")'
       - name: Run tests under ASan
@@ -70,8 +76,9 @@ jobs:
           emacs -Q --batch -L . -l fz-index-tests.el -f ert-run-tests-batch-and-exit
           for t in test-m3.el test-m4.el test-open.el test-ui-fix.el \
                    test-ui-flow.el test-multiword.el test-persist.el \
-                   test-refresh.el test-highlight.el test-completion-table.el \
-                   test-module-install.el test-fuzz.el; do
+                   test-refresh.el test-symlink.el test-highlight.el \
+                   test-completion-table.el test-module-install.el \
+                   test-fuzz.el; do
             echo "== $t"
             emacs -Q --batch -L . -l "$t"
           done

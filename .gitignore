@@ -3,3 +3,6 @@
 *.dll
 *.dylib
 fz-index-history.el
+fz-asan-stress
+fz-asan-stress.exe
+fz-asan-fix/

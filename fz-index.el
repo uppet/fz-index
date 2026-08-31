@@ -991,51 +991,72 @@ while the transfer runs; url.el gives no progress of its own for
 (defun fz-index--download-module (dest)
   "Download the prebuilt module for this platform to DEST.
 The download is verified against the SHA-256 checksums published
-with the release.  Returns non-nil on success."
+with the release.  Return t on success, a keyword naming the
+failure reason (`:network', `:no-checksum', `:checksum-mismatch'
+or `:disk-mismatch'), or nil when this platform has no prebuilt
+asset (the caller should compile instead)."
   (when-let* ((platform (fz-index--platform))
               (base (format "https://github.com/uppet/fz-index/releases/download/v%s"
                             fz-index-version))
-              (name (format "fz-index-%s%s" platform module-file-suffix))
-              (bin (fz-index--fetch (concat base "/" name)
-                                    (format "fz-index: downloading %s" name)))
-              (sums (fz-index--fetch (concat base "/checksums.txt"))))
-    (if (not (string-match (format "^\\([0-9a-f]\\{64\\}\\) +%s$"
+              (name (format "fz-index-%s%s" platform module-file-suffix)))
+    (let* ((bin (fz-index--fetch (concat base "/" name)
+                                 (format "fz-index: downloading %s" name)))
+           ;; Skip the checksum fetch entirely when the binary fetch
+           ;; already failed.
+           (sums (and bin (fz-index--fetch (concat base "/checksums.txt")))))
+      (cond
+       ((null bin) :network)
+       ((null sums) :network)
+       ((not (string-match (format "^\\([0-9a-f]\\{64\\}\\) +%s$"
                                    (regexp-quote name))
                            sums))
-        (progn (message "fz-index: %s not found in checksums.txt" name)
-               nil)
-      (let ((want (match-string 1 sums))
-            (got (secure-hash 'sha256 (encode-coding-string bin 'binary))))
-        (if (not (equal want got))
-            (progn (message "fz-index: checksum mismatch for %s" name)
-                   nil)
-          ;; Binary write: the default coding system would re-encode
-          ;; the bytes and corrupt the module.
-          (let ((coding-system-for-write 'binary))
-            (write-region bin nil dest nil 'silent))
-          ;; Verify what landed on disk, not just what we received.
-          (let ((ondisk (with-temp-buffer
-                          (set-buffer-multibyte nil)
-                          (insert-file-contents-literally dest)
-                          (secure-hash 'sha256 (buffer-string)))))
-            (if (not (equal want ondisk))
-                (progn (delete-file dest)
-                       (message "fz-index: on-disk checksum mismatch for %s"
-                                name)
-                       nil)
-              (message "fz-index: downloaded %s" name)
-              t)))))))
+        (message "fz-index: %s not found in checksums.txt" name)
+        :no-checksum)
+       (t
+        (let ((want (match-string 1 sums))
+              (got (secure-hash 'sha256 (encode-coding-string bin 'binary))))
+          (if (not (equal want got))
+              (progn (message "fz-index: checksum mismatch for %s" name)
+                     :checksum-mismatch)
+            ;; Binary write: the default coding system would re-encode
+            ;; the bytes and corrupt the module.
+            (let ((coding-system-for-write 'binary))
+              (write-region bin nil dest nil 'silent))
+            ;; Verify what landed on disk, not just what we received.
+            (let ((ondisk (with-temp-buffer
+                            (set-buffer-multibyte nil)
+                            (insert-file-contents-literally dest)
+                            (secure-hash 'sha256 (buffer-string)))))
+              (if (not (equal want ondisk))
+                  (progn (delete-file dest)
+                         (message "fz-index: on-disk checksum mismatch for %s"
+                                  name)
+                         :disk-mismatch)
+                (message "fz-index: downloaded %s" name)
+                t)))))))))
+
+(defun fz-index--download-failure (reason)
+  "Return a human-readable description of download failure REASON.
+REASON is a keyword returned by `fz-index--download-module'."
+  (pcase reason
+    (:network "network error while contacting GitHub Releases")
+    (:no-checksum "the release does not list this platform's module in checksums.txt")
+    (:checksum-mismatch "the downloaded bytes do not match the published SHA-256 checksum")
+    (:disk-mismatch "the module could not be written to disk intact (the on-disk bytes do not match the published checksum)")
+    (_ (format "unknown download failure %S" reason))))
 
 (defun fz-index--build-module (dest)
   "Compile the bundled fz-index.c into DEST.
-Returns non-nil on success.  The compiler runs asynchronously so
-its output can collect in the *fz-index-build* buffer while
-elapsed time ticks in the echo area; with `call-process' Emacs
-froze with no feedback for the whole compile."
+Return t on success, `:no-compiler' when no C compiler or bundled
+source is available, or `:compile-failed'.  The compiler runs
+asynchronously so its output can collect in the *fz-index-build*
+buffer while elapsed time ticks in the echo area; with
+`call-process' Emacs froze with no feedback for the whole compile."
   (let ((src (expand-file-name "fz-index.c" fz-index--directory))
         (cc (or (executable-find "gcc") (executable-find "clang")
                 (executable-find "cc"))))
-    (when (and (file-exists-p src) cc)
+    (if (not (and (file-exists-p src) cc))
+        :no-compiler
       (message "fz-index: compiling module with %s ..." cc)
       (let ((args (append (if (eq system-type 'darwin)
                               '("-O2" "-fPIC" "-std=c99" "-dynamiclib")
@@ -1072,7 +1093,7 @@ froze with no feedback for the whole compile."
           (if (not (zerop (process-exit-status proc)))
               (progn (message "fz-index: build failed, see buffer %s"
                               (buffer-name buf))
-                     nil)
+                     :compile-failed)
             (message "fz-index: module compiled")
             t))))))
 
@@ -1130,23 +1151,40 @@ install the module ahead of time."
         ;; Download the prebuilt binary or compile the bundled source;
         ;; if either produces a module that still fails to load, the
         ;; file is deleted and the other source is tried.
-        (if (and (fz-index--download-module file)
-                 (fz-index--load-module-file file))
-            t
-          (let ((built (fz-index--build-module file)))
-            (if (and built (fz-index--load-module-file file))
-                t
-              ;; The reason differs: nothing produced a module, or a
-              ;; module was built but this Emacs cannot load it (the
-              ;; load error itself is messaged by
-              ;; `fz-index--load-module-file').
-              (user-error "fz-index: module installation failed (%s); \
+        (let ((download (fz-index--download-module file)))
+          (if (and (eq download t) (fz-index--load-module-file file))
+              t
+            (let* ((built (fz-index--build-module file))
+                   (why
+                    (format "%s, and %s"
+                            (cond
+                             ((eq download t)
+                              "the prebuilt module was downloaded but \
+this Emacs cannot load it")
+                             ((null download)
+                              "no prebuilt module is available for \
+this platform")
+                             (t
+                              (format "the prebuilt module could not be \
+installed (%s)"
+                                      (fz-index--download-failure download))))
+                            (cond
+                             ((eq built t)
+                              "the module was compiled but this Emacs \
+cannot load it")
+                             ((eq built :compile-failed)
+                              "the bundled source failed to compile \
+(see *fz-index-build*)")
+                             (t "no usable C compiler was found")))))
+              (if (and (eq built t) (fz-index--load-module-file file))
+                  t
+                ;; Both install paths failed or produced modules this
+                ;; Emacs cannot load.  The load errors themselves are
+                ;; messaged by `fz-index--load-module-file'; this error
+                ;; names which step failed and why.
+                (user-error "fz-index: module installation failed: %s; \
 see https://github.com/uppet/fz-index"
-                          (if built
-                              "the module was built but this Emacs \
-cannot load it"
-                            "no prebuilt module for this platform and \
-no usable C compiler")))))))))))
+                            why)))))))))))
 
 (provide 'fz-index)
 ;;; fz-index.el ends here

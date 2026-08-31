@@ -50,8 +50,9 @@ make                 # produces fz-index.so (or .dylib on macOS)
 emacs -Q --batch --eval '(byte-compile-file "fz-index.el")'
 emacs -Q --batch -L . -l fz-index-tests.el -f ert-run-tests-batch-and-exit
 for t in test-m3.el test-m4.el test-open.el test-ui-fix.el test-ui-flow.el \
-         test-multiword.el test-persist.el test-refresh.el test-highlight.el \
-         test-completion-table.el test-module-install.el test-fuzz.el; do
+         test-multiword.el test-persist.el test-refresh.el test-symlink.el \
+         test-highlight.el test-completion-table.el test-module-install.el \
+         test-fuzz.el; do
   emacs -Q --batch -L . -l "$t" || exit 1
 done
 ```
@@ -99,9 +100,17 @@ maintainer uses a locally built Emacs at `../build-31.1/src/emacs`.
   LIFO queue in `fz_scan_ctx`).  All queue handoffs happen under
   `sc->mu`; `fz_index_add` is serialized under `ix->add_mu`;
   `.gitignore` levels are refcounted `fz_ign_node`s — acquire when
-  enqueueing a child job, release when the job is done.  When touching
-  this code, re-run the cancel stress (build + immediate
-  `fz-index-destroy` in a loop) under ASan.
+  enqueueing a child job, release when the job is done.
+  Symlinked directories are never descended into (`fz_lstat`
+  classification in `fz_scan_dir`): a loop, or a link out of the
+  tree, would keep the scan growing forever.  Symlinked regular
+  files ARE indexed.  On Windows `fz_lstat` is plain `stat` (mingw),
+  so directory links and junctions may still be followed there.
+  When touching this code, re-run the ASan stress harness, which
+  covers a symlink loop and mid-flight cancels and also gates the
+  asan CI job: `gcc -fsanitize=address,undefined -std=c99
+  fz-asan-stress.c -o fz-asan-stress -lpthread &&
+  ASAN_OPTIONS=detect_leaks=0 ./fz-asan-stress`.
 - Interactive Emacs ignores SIGPIPE but BATCH Emacs does not: a
   worker thread writing to a pipe whose Lisp process was deleted
   mid-scan kills batch Emacs with SIGPIPE.  The build worker blocks
