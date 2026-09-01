@@ -54,7 +54,7 @@
   (let ((build (- (float-time) t0))
         (count (fz-index-count h)))
     (princ (format "bench: index build %.3f s, %d files\n" build count))
-    (when-let ((avg (bench--avg-rel-len h 100)))
+    (when-let* ((avg (bench--avg-rel-len h 100)))
       (princ (format "bench: sample avg rel path %.1f bytes\n" avg)))
     (dolist (q '("emacs.c" "util hash" "render frame" "zzz-nonexistent"))
       (princ (format "bench: query %-16s %7.2f ms/query\n"
