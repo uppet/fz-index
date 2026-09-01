@@ -158,13 +158,18 @@ fz_index_add (fz_index *ix, const char *data, size_t len)
   if (ix->count == ix->cap)
     {
       size_t newcap = ix->cap ? ix->cap * 2 : 1 << 16;
-      uint32_t *n = realloc (ix->offs, newcap * sizeof *n);
-      if (!n)
+      uint32_t *no = realloc (ix->offs, newcap * sizeof *no);
+      if (!no)
         return -1;
-      ix->offs = n;
       uint32_t *nl = realloc (ix->lens, newcap * sizeof *nl);
       if (!nl)
-        return -1;
+        {
+          /* Both arrays must grow together; free the new OFFS block
+             and keep the old pair, so CAP stays consistent.  */
+          free (no);
+          return -1;
+        }
+      ix->offs = no;
       ix->lens = nl;
       ix->cap = newcap;
     }
@@ -176,10 +181,15 @@ fz_index_add (fz_index *ix, const char *data, size_t len)
       char *np = realloc (ix->paths, newcap);
       if (!np)
         return -1;
-      ix->paths = np;
       char *nl = realloc (ix->lower, newcap);
       if (!nl)
-        return -1;
+        {
+          /* Same for the arenas: free the new PATHS block and keep
+             the old pair.  */
+          free (np);
+          return -1;
+        }
+      ix->paths = np;
       ix->lower = nl;
       ix->paths_cap = newcap;
     }
