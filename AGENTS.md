@@ -38,10 +38,11 @@ the surrounding style.
   `ert-run-tests-batch-and-exit`).  `test-*.el` — batch
   integration/performance scripts (NOT ert); each exits non-zero on
   failure.  `melpa-recipe` — recipe to submit to melpa/melpa.
-- `.github/workflows/build.yml` — ERT + integration tests on Emacs
-  28.2/29.4/30.2, an ASan+UBSan job, and prebuilt modules for 5
-  platform tags published with `checksums.txt` to the GitHub release
-  on `v*` tags.
+- `.github/workflows/build.yml` — ERT + integration tests on
+  ubuntu/macOS/Windows × Emacs 28.2/29.4/30.2, checkdoc and
+  package-lint, an ASan+UBSan job with `clang --analyze`, and
+  prebuilt modules for 5 platform tags published with
+  `checksums.txt` to the GitHub release on `v*` tags.
 
 ## Build and test
 
@@ -59,6 +60,34 @@ done
 
 Any emacs ≥ 28.1 with module support works.  During development the
 maintainer uses a locally built Emacs at `../build-31.1/src/emacs`.
+
+## Pushing and CI
+
+The CI matrix (`.github/workflows/build.yml`) runs the tests on
+Linux/macOS/Windows × Emacs 28.2/29.4/30.2, plus an ASan job with
+`clang --analyze`.  A green local run on Linux proves little for
+the other platforms: the matrix has caught real bugs in symlink
+semantics, in `/tmp` path expansion (`/tmp/...` becomes
+`d:\tmp\...` on Windows, so raw `/tmp/...` strings used as hash
+keys stop matching), and in file-name encoding — none of which
+show up locally.  Therefore:
+
+- Land non-trivial changes through a PR.  The bare `pull_request:`
+  trigger runs the full matrix on every PR; pushes to the branch
+  re-run it.  Merge only once it is green:
+
+  ```sh
+  git push origin <branch>
+  gh pr create --head <branch> --fill
+  gh pr checks --watch          # iterate on the branch until green
+  gh pr merge <branch>          # or fast-forward main yourself
+  git push origin --delete <branch>
+  ```
+
+- Direct pushes to `main` are for CI-trivial changes (docs,
+  comments) and for one thing only otherwise: repairing a red
+  main.  A red main has priority over feature work — fix it first,
+  push the fix directly, confirm the run goes green.
 
 ## Hard-won implementation facts (don't relearn these)
 
@@ -139,8 +168,9 @@ maintainer uses a locally built Emacs at `../build-31.1/src/emacs`.
 ## When changing things
 
 - Keep `README.org` in sync with key bindings and user options.
-- Run the full test loop above; it is the only CI gate besides
-  byte-compilation and `check-parens`.
+- Run the full test loop above.  Besides it, CI gates on
+  byte-compilation, `check-parens`, checkdoc, package-lint and
+  `clang --analyze` (see `.github/workflows/build.yml`).
 - C changes: remember the module runs on worker threads and is
   loaded into the user's Emacs — a crash kills the editor.  Prefer
   boring, obviously-correct code.
