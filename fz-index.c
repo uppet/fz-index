@@ -1687,8 +1687,12 @@ fz_query_impl (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
           ix->last_hits_cap = total_hits;
         }
     }
-  if (total_hits <= ix->last_hits_cap)
+  if (total_hits > 0 && total_hits <= ix->last_hits_cap)
     {
+      /* total_hits > 0 also keeps the memcpy destination non-null:
+         with zero hits LAST_HITS may never have been allocated, and
+         memcpy (NULL, ..., 0) is undefined even though it copies
+         nothing (clang's analyzer flags it).  */
       size_t at = 0;
       for (size_t t = 0; t < nthreads; t++)
         {

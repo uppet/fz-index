@@ -22,7 +22,15 @@ jobs:
         with:
           msystem: MINGW64
           install: make mingw-w64-x86_64-gcc
+      # purcell/setup-emacs does not support Windows (its install.sh
+      # is mangled by Git bash path conversion); use the Windows
+      # fork there instead.
       - uses: purcell/setup-emacs@master
+        if: runner.os != 'Windows'
+        with:
+          version: ${{ matrix.emacs }}
+      - uses: jcs090218/setup-emacs-windows@master
+        if: runner.os == 'Windows'
         with:
           version: ${{ matrix.emacs }}
       - name: Build the module (Windows)
@@ -33,11 +41,15 @@ jobs:
         if: runner.os != 'Windows'
         run: make
       - name: Byte-compile and parens check
+        shell: bash
         run: >
           emacs -Q --batch
           --eval '(with-current-buffer (find-file "fz-index.el") (check-parens))'
           --eval '(byte-compile-file "fz-index.el")'
+      # The linters are OS-independent; run them once on Linux instead
+      # of nine times across the matrix.
       - name: checkdoc
+        if: runner.os == 'Linux'
         run: |
           set -e
           emacs -Q --batch --eval '(checkdoc-file "fz-index.el")' \
@@ -47,14 +59,17 @@ jobs:
             exit 1
           fi
       - name: package-lint
+        if: runner.os == 'Linux'
         run: |
           set -e
-          curl -fsSL \
-            https://raw.githubusercontent.com/purcell/package-lint/master/package-lint.el \
-            -o /tmp/package-lint.el
-          emacs -Q --batch -L /tmp -l /tmp/package-lint.el \
+          # package-lint needs its bundled data/ directory, so a
+          # single-file download does not work; clone the repo.
+          git clone --depth 1 https://github.com/purcell/package-lint \
+            /tmp/package-lint
+          emacs -Q --batch -L /tmp/package-lint \
             -f package-lint-batch-and-exit fz-index.el
       - name: Run tests
+        shell: bash
         run: |
           set -e
           emacs -Q --batch -L . -l fz-index-tests.el -f ert-run-tests-batch-and-exit
