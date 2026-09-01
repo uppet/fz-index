@@ -6,3 +6,5 @@ fz-index-history.el
 fz-asan-stress
 fz-asan-stress.exe
 fz-asan-fix/
+bench-gen-tree
+bench-gen-tree.exe

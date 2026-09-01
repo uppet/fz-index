@@ -197,7 +197,25 @@ makes it sensitive.
 
 * Performance (400k files, synthetic third_party-style tree)
 
-| operation     | time      |
-|---------------+-----------|
-| cold index    | ~0.1 s    |
-| per-keystroke | 24–38 ms  |
+| operation     | time (Linux) |
+|---------------+--------------|
+| cold index    | ~0.1 s       |
+| per-keystroke | 24–38 ms     |
+
+*Reproduce it yourself.*  =bench.el= times the index build and a set
+of representative queries (single-word, multi-word, no-match, and an
+incremental narrowing sequence) and prints the Emacs/OS identity and
+file count, so results are comparable across machines.  The synthetic
+tree is generated deterministically with =bench-gen-tree.c=:
+
+#+begin_src sh
+gcc -O2 -std=c99 bench-gen-tree.c -o bench-gen-tree
+./bench-gen-tree /tmp/bench-tree 400000
+emacs -Q --batch -L . -l bench.el /tmp/bench-tree
+#+end_src
+
+The numbers above are cold timings from a Linux machine; index build
+is I/O-bound and varies a lot by platform and filesystem.  As an
+example, the same synthetic tree with the mingw build on Windows
+(8 threads, NTFS) indexes in ~28 s while per-keystroke queries stay
+in the tens of milliseconds.
