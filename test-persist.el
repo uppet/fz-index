@@ -1,5 +1,5 @@
 ;;; Index persistence: save/load round-trip and stale-while-revalidate. -*- lexical-binding: t; -*-
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
 (load (expand-file-name "./fz-index.elc") nil t)
 
 (make-directory "/tmp/fz-persist/sub" t)

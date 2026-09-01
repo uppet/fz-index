@@ -1,5 +1,5 @@
 ;;; Regression test for fz-index M3.  -*- lexical-binding: t; -*-
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
 
 (let ((ix (fz-index-build "/tmp/fz-index-bench")))
   (let ((t0 (float-time)) (deadline (+ (float-time) 10)))

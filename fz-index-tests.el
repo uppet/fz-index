@@ -5,11 +5,26 @@
 
 (require 'ert)
 
-(module-load (expand-file-name "./fz-index.so"
-                             (file-name-directory
-                              (or load-file-name buffer-file-name))))
+(module-load (expand-file-name
+              (concat "fz-index" module-file-suffix)
+              (file-name-directory (or load-file-name buffer-file-name))))
 
 (defvar fz-index-test-dir nil)
+
+(defun fz-index-test--case-sensitive-p (dir)
+  "Return non-nil if the filesystem holding DIR distinguishes case.
+Case-insensitive filesystems (NTFS, default APFS) fold \"a\" and
+\"A\" onto one entry, which collapses fixtures that differ only in
+case; tests that rely on such pairs skip themselves there."
+  (let ((a (expand-file-name "fz-case-sens-a" dir))
+        (b (expand-file-name "fz-case-sens-A" dir)))
+    (write-region "lower" nil a nil 'silent)
+    (write-region "UPPER" nil b nil 'silent)
+    (prog1 (with-temp-buffer
+             (insert-file-contents a)
+             (equal (buffer-string) "lower"))
+      (ignore-errors (delete-file a))
+      (ignore-errors (delete-file b)))))
 
 (defun fz-index-test--with-fixture (files thunk)
   "Create a temp tree with FILES (relative names), run THUNK with its root."
@@ -82,10 +97,12 @@
    '("src/Emacs.c" "src/emacs.c")
    (lambda (root)
      (let ((h (fz-index-test--ready-index root)))
-       ;; Lowercase query matches both cases; uppercase restricts.
-       (should (= (length (fz-query h "emacs" 10)) 2))
-       (should (equal (mapcar #'car (fz-query h "Emacs" 10))
-                      '("src/Emacs.c")))
+       (if (not (fz-index-test--case-sensitive-p root))
+           (message "smart-case: skipping, case-insensitive filesystem")
+         ;; Lowercase query matches both cases; uppercase restricts.
+         (should (= (length (fz-query h "emacs" 10)) 2))
+         (should (equal (mapcar #'car (fz-query h "Emacs" 10))
+                        '("src/Emacs.c"))))
        (fz-index-destroy h)))))
 
 (ert-deftest fz-index-test-save-load ()

@@ -1,26 +1,37 @@
 ;;; Fuzz the module with pathological file names and queries. -*- lexical-binding: t; -*-
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
 
 (defconst fz-fuzz-dir "/tmp/fz-fuzz")
 
 ;; --- Fixture: pathological names.
 (delete-directory fz-fuzz-dir t)
 (make-directory (concat fz-fuzz-dir "/sub") t)
-(dolist (name
-         (list "normal.c"
-               (concat (make-string 200 ?a) ".c")   ; very long name
-               "with space.c"
-               "with'quote.c"
-               "with\"dquote.c"
-               "with\\backslash.c"
-               "with*star.c"
-               "with[bracket].c"
-               "line\nbreak.c"                      ; newline in name
-               "tab\tname.c"
-               "中文文件.c"
-               "emoji-\U0001F600.c"
-               ".hidden.c"
-               (string-make-unibyte "raw-\xff\xfe-bytes.c")))
+(defconst fz-fuzz-names
+  (list "normal.c"
+        (concat (make-string 200 ?a) ".c")   ; very long name
+        "with space.c"
+        "with'quote.c"
+        "with\"dquote.c"
+        "with\\backslash.c"
+        "with*star.c"
+        "with[bracket].c"
+        "line\nbreak.c"                      ; newline in name
+        "tab\tname.c"
+        "中文文件.c"
+        "emoji-\U0001F600.c"
+        ".hidden.c"
+        (string-make-unibyte "raw-\xff\xfe-bytes.c")))
+;; Windows cannot represent `"', `*' or `\' in a file name and its
+;; filesystem rejects raw-byte (unibyte) names; drop those entries
+;; there so the fixture still exercises everything else.
+(defconst fz-fuzz-names
+  (if (eq system-type 'windows-nt)
+      (seq-filter (lambda (n)
+                    (and (multibyte-string-p n)
+                         (not (string-match-p "[\"\\\\*]" n))))
+                  fz-fuzz-names)
+    fz-fuzz-names))
+(dolist (name fz-fuzz-names)
   (write-region "" nil (concat fz-fuzz-dir "/" name) nil 'silent))
 (write-region "" nil (concat fz-fuzz-dir "/sub/deep.c") nil 'silent)
 ;; Deep nesting.

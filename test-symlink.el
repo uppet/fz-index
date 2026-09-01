@@ -1,7 +1,15 @@
 ;;; Symlink handling in the scanner.  -*- lexical-binding: t; -*-
 ;;; Directory links are not followed (a loop must not keep the scan
 ;;; growing); symlinked files are indexed.
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
+
+;; Windows usually requires a privilege to create symlinks, and the
+;; scanner there degrades to following directory links anyway
+;; (fz_lstat is stat), so the POSIX semantics this test asserts do
+;; not hold on Windows; skip it.
+(when (eq system-type 'windows-nt)
+  (princ "symlink tests skipped (Windows)\n")
+  (kill-emacs 0))
 
 (defun fz--symlink-fixture-clean ()
   "Delete the fixture from a possible earlier run.

@@ -1,6 +1,6 @@
 ;;; Module install / load-failure handling tests.  -*- lexical-binding: t; -*-
 (require 'cl-lib)
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
 (load (expand-file-name "./fz-index.elc") nil t)
 
 ;; A file that fails module-load: deleted when auto-install is on

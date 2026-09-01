@@ -1,5 +1,5 @@
 ;;; Regression test: RET on a previewed candidate must keep the file open. -*- lexical-binding: t; -*-
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
 (load (expand-file-name "./fz-index.elc") nil t)
 
 ;; End-to-end: empty input shows history candidates; preview loads the

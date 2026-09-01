@@ -1,5 +1,5 @@
 ;;; Multi-word (space-separated AND) query tests.  -*- lexical-binding: t; -*-
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
 (require 'cl-lib)
 
 (make-directory "/tmp/fz-mw/src" t)

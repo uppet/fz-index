@@ -1,10 +1,10 @@
 ;;; Test frecency re-sort (log2 + half-life decay) and persistence. -*- lexical-binding: t; -*-
-(module-load (expand-file-name "./fz-index.so"))
+(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
 (load (expand-file-name "./fz-index.elc") nil t)
 
 (let ((fz-index--history (make-hash-table :test 'equal)))
   (dotimes (_ 3)
-    (fz-index--record "/proj/src/old-favorite.c"))
+    (fz-index--record (expand-file-name "/proj/src/old-favorite.c")))
   (let* ((cands '(("src/emacs.c" 87 nil) ("src/old-favorite.c" 60 nil)
                   ("src/macros.c" 70 nil)))
          (res (fz-index--apply-frecency cands "/proj/")))
@@ -15,7 +15,7 @@
     (princ (format "order after frecency: %s\n" (mapcar #'car res)))
     ;; 31 opens total: 8*log2(32)=40, capped at 40 -> 100, tops the list.
     (dotimes (_ 28)
-      (fz-index--record "/proj/src/old-favorite.c"))
+      (fz-index--record (expand-file-name "/proj/src/old-favorite.c")))
     (let ((res2 (fz-index--apply-frecency cands "/proj/")))
       (unless (equal (car (car res2)) "src/old-favorite.c")
         (error "BUG: frecency did not top the list: %s" (mapcar #'car res2)))
