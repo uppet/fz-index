@@ -37,6 +37,23 @@ jobs:
           emacs -Q --batch
           --eval '(with-current-buffer (find-file "fz-index.el") (check-parens))'
           --eval '(byte-compile-file "fz-index.el")'
+      - name: checkdoc
+        run: |
+          set -e
+          emacs -Q --batch --eval '(checkdoc-file "fz-index.el")' \
+            > /tmp/checkdoc.log 2>&1 || true
+          if grep -q "fz-index.el:" /tmp/checkdoc.log; then
+            cat /tmp/checkdoc.log
+            exit 1
+          fi
+      - name: package-lint
+        run: |
+          set -e
+          curl -fsSL \
+            https://raw.githubusercontent.com/purcell/package-lint/master/package-lint.el \
+            -o /tmp/package-lint.el
+          emacs -Q --batch -L /tmp -l /tmp/package-lint.el \
+            -f package-lint-batch-and-exit fz-index.el
       - name: Run tests
         run: |
           set -e

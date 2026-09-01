@@ -140,8 +140,8 @@ used as the base.  Cleared by `fz-index-reset'."
   "Overlay highlighting the selected candidate.")
 
 (defvar fz-index--action 'open
-  "Action on the selected candidate: `open', `open-other-window'
-or `insert-path'.")
+  "Action taken on the selected candidate.
+One of `open', `open-other-window' or `insert-path'.")
 
 (defvar fz-index--origin-window nil
   "Window that was selected when `fz-index-open-file' was invoked.")
@@ -275,15 +275,14 @@ finishes.  0 means never refresh on age."
 (defun fz-index--index-for (root)
   "Return the index handle for ROOT, building or refreshing as needed.
 When a cache file exists, its index is returned immediately and a
-background rescan replaces it once finished
-(stale-while-revalidate).  Otherwise a background scan builds the
-index; a pipe process filter updates any active `fz-index-open-file'
-session when the index becomes ready.  A live index older than
-`fz-index-max-age' is likewise refreshed in the background.  Remote
-(TRAMP) directories are not supported: the module indexes the local
-filesystem only."
+background rescan replaces it once finished (stale-while-revalidate).
+Otherwise a background scan builds the index; a pipe process filter
+updates any active `fz-index-open-file' session when the index
+becomes ready.  A live index older than `fz-index-max-age' is
+likewise refreshed in the background.  Remote (TRAMP) directories are
+not supported: the module indexes the local filesystem only."
   (when (file-remote-p root)
-    (user-error "fz-index: cannot index remote directory %s (TRAMP is not supported)"
+    (user-error "Cannot index the remote directory %s (TRAMP is not supported)"
                 root))
   (let ((handle (gethash root fz-index--indexes)))
     (cond
@@ -488,11 +487,12 @@ Rebuild happens on the next `fz-index-open-file'."
     (fz-index--highlight-selection)))
 
 (defcustom fz-index-query-oversample 3
-  "Fetch this many times `fz-index-query-limit' raw matches from
-`fz-query', so a frecency boost can pull an often-opened file back
-into the displayed list even when its raw score ranks below the
-raw cut.  The extra cost is C-side heap work; the displayed list is
-trimmed back to `fz-index-query-limit'."
+  "Raw matches fetched per displayed candidate, in multiples of the limit.
+`fz-query' is asked for this many times `fz-index-query-limit' so a
+frecency boost can pull an often-opened file back into the list even
+when its raw score ranks below the raw cut.  The extra cost is
+C-side heap work; the displayed list is trimmed back to
+`fz-index-query-limit'."
   :type 'natnum)
 
 (defun fz-index--query-candidates (handle input root)
@@ -500,7 +500,9 @@ trimmed back to `fz-index-query-limit'."
 Fetches `fz-index-query-oversample' times `fz-index-query-limit'
 raw matches, applies the frecency boost, then trims to
 `fz-index-query-limit'.  This is the candidate computation shared
-by the minibuffer UI and the completion table."
+by the minibuffer UI and the completion table.  ROOT is the index
+root; candidate paths are expanded against it for the frecency
+lookup."
   (seq-take (fz-index--apply-frecency
              (fz-query handle input
                        (* fz-index-query-oversample
@@ -572,7 +574,7 @@ The result has the same (RELATIVE-PATH SCORE POSITIONS) shape as
     (insert (car (nth fz-index--selected fz-index--candidates)))))
 
 (defun fz-index--results-click (event)
-  "Select the clicked candidate and confirm it."
+  "Select the candidate clicked in EVENT and confirm it."
   (interactive "e")
   (let ((line (1- (line-number-at-pos (posn-point (event-start event))))))
     (when (and fz-index--candidates (< line (length fz-index--candidates)))
@@ -647,8 +649,8 @@ minibuffer exits.  Lines without a candidate do nothing."
     (and handle (fz-index-ready-p handle))))
 
 (defun fz-index--highlight-selection ()
-  "Move the selection overlay to the selected candidate's line,
-and scroll the results window so the selection stays visible."
+  "Move the selection overlay onto the selected candidate's line.
+The results window scrolls so the selection stays visible."
   (let ((buf (get-buffer fz-index-results-buffer-name)))
     (when (and buf fz-index--candidates)
       (with-current-buffer buf
@@ -714,7 +716,9 @@ log2(count+1) compressed by a half-life decay on the last-open time."
              fz-index--history)))
 
 (defun fz-index--apply-frecency (candidates root)
-  "Re-sort CANDIDATES ((REL SCORE POSITIONS) ...) with the history bonus."
+  "Re-sort CANDIDATES ((REL SCORE POSITIONS) ...) with the history bonus.
+ROOT is the index root; each REL path is expanded against it for
+the history lookup."
   (let ((boosted
          (mapcar (lambda (c)
                    (list (car c)
@@ -768,8 +772,8 @@ are migrated with the current time, i.e. they start undecayed."
 
 (defcustom fz-index-preview-delay 0.15
   "Seconds of idle time before the selected candidate is previewed.
-Rapid C-n/C-p navigation does not preview intermediate candidates;
-only the file the selection settles on is loaded."
+Rapid navigation does not preview intermediate candidates; only the
+file the selection settles on is loaded."
   :type 'number)
 
 (defun fz-index--toggle-preview ()
@@ -901,7 +905,8 @@ again.  While the index is still building, the table is empty."
 Unlike `fz-index-open-file' with its own UI, this goes through the
 standard completion machinery, so it works with whatever completion
 framework you use (vertico, icomplete, fido, the default UI, ...).
-The base directory is the same one `fz-index-open-file' would use."
+The base directory is the same one `fz-index-open-file' would use.
+PROMPT, when given, replaces the default prompt."
   (interactive)
   (fz-index-ensure-module)
   (let* ((root (fz-index--root))
@@ -1187,7 +1192,7 @@ install the module ahead of time."
        ((and (file-exists-p file) (fz-index--load-module-file file))
         t)
        ((not fz-index-module-auto-install)
-        (user-error "fz-index module missing or unloadable at %s" file))
+        (user-error "The fz-index module is missing or unloadable at %s" file))
        (t
         ;; Download the prebuilt binary or compile the bundled source;
         ;; if either produces a module that still fails to load, the
@@ -1223,7 +1228,7 @@ cannot load it")
                 ;; Emacs cannot load.  The load errors themselves are
                 ;; messaged by `fz-index--load-module-file'; this error
                 ;; names which step failed and why.
-                (user-error "fz-index: module installation failed: %s; \
+                (user-error "Module installation failed: %s; \
 see https://github.com/uppet/fz-index"
                             why)))))))))))
 
