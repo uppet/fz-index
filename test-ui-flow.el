@@ -3,9 +3,16 @@
 (load (expand-file-name "./fz-index.elc") nil t)
 (require 'cl-lib)
 
-;; Keep the on-disk index cache out of the real user directory.
+;; Keep the on-disk index cache and history out of the real user
+;; directory.  All fixture paths go through one expanded root: on
+;; Windows expand-file-name maps "/tmp" to the current drive's \tmp,
+;; so the raw string would not match the key fz-index--root uses.
 (setq user-emacs-directory "/tmp/fz-flow-uem/")
+(setq fz-index-history-file
+      (expand-file-name "fz-flow-hist.el" user-emacs-directory))
 (make-directory user-emacs-directory t)
+(defconst fz-flow-root
+  (file-name-as-directory (expand-file-name "/tmp/fz-index-flow/")))
 
 ;; Batch read-from-minibuffer reads stdin and never runs the setup
 ;; hook, so mock it: run the setup hook (initial update), then replay
@@ -31,22 +38,22 @@
     opened))
 
 ;; Small fixture tree; the index is pre-built so queries are answered.
-(make-directory "/tmp/fz-index-flow/sub" t)
-(write-region "" nil "/tmp/fz-index-flow/backup.c" nil 'silent)
-(write-region "" nil "/tmp/fz-index-flow/sub/backup-extra.c" nil 'silent)
-(write-region "" nil "/tmp/fz-index-flow/other.c" nil 'silent)
-(let ((h (fz-index-build "/tmp/fz-index-flow/")))
+(make-directory (concat fz-flow-root "sub") t)
+(write-region "" nil (concat fz-flow-root "backup.c") nil 'silent)
+(write-region "" nil (concat fz-flow-root "sub/backup-extra.c") nil 'silent)
+(write-region "" nil (concat fz-flow-root "other.c") nil 'silent)
+(let ((h (fz-index-build fz-flow-root)))
   (while (not (fz-index-ready-p h))
     (sleep-for 0.005))
-  (puthash "/tmp/fz-index-flow/" h fz-index--indexes))
+  (puthash fz-flow-root h fz-index--indexes))
 
 ;; RET opens the first candidate; C-n RET opens the second; both must
 ;; be the two backup* fixtures and must differ (i.e. C-n took effect).
-(let* ((first (fz-index-test--run-session "/tmp/fz-index-flow/" "backu" 0))
-       (second (fz-index-test--run-session "/tmp/fz-index-flow/" "backu" 1)))
+(let* ((first (fz-index-test--run-session fz-flow-root "backu" 0))
+       (second (fz-index-test--run-session fz-flow-root "backu" 1)))
   (princ (format "RET: %S\nC-n RET: %S\n" first second))
   (unless (and (equal (car first) 'find-file)
-               (string-prefix-p "/tmp/fz-index-flow/" (cdr first))
+               (string-prefix-p fz-flow-root (cdr first))
                (string-match-p "backup" (cdr first)))
     (error "BUG: RET opened %S, expected a backup* fixture" first))
   (unless (and (equal (car second) 'find-file)
@@ -55,13 +62,13 @@
     (error "BUG: C-n RET opened %S, expected the other backup* fixture"
            second)))
 
-(when-let* ((h (gethash "/tmp/fz-index-flow/" fz-index--indexes)))
+(when-let* ((h (gethash fz-flow-root fz-index--indexes)))
   (fz-index-destroy h)
-  (remhash "/tmp/fz-index-flow/" fz-index--indexes))
-(delete-file "/tmp/fz-index-flow/backup.c")
-(delete-file "/tmp/fz-index-flow/sub/backup-extra.c")
-(delete-file "/tmp/fz-index-flow/other.c")
-(delete-directory "/tmp/fz-index-flow/sub")
-(delete-directory "/tmp/fz-index-flow")
+  (remhash fz-flow-root fz-index--indexes))
+(delete-file (concat fz-flow-root "backup.c"))
+(delete-file (concat fz-flow-root "sub/backup-extra.c"))
+(delete-file (concat fz-flow-root "other.c"))
+(delete-directory (concat fz-flow-root "sub"))
+(delete-directory fz-flow-root)
 (princ "ui flow tests done\n")
 (delete-directory "/tmp/fz-flow-uem" t)

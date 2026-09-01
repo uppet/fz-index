@@ -21,16 +21,17 @@
         "emoji-\U0001F600.c"
         ".hidden.c"
         (string-make-unibyte "raw-\xff\xfe-bytes.c")))
-;; Windows cannot represent `"', `*' or `\' in a file name and its
-;; filesystem rejects raw-byte (unibyte) names; drop those entries
-;; there so the fixture still exercises everything else.
+;; Windows cannot represent `"', `*' or `\' in a file name; Windows
+;; and macOS both reject raw-byte (unibyte, non-UTF-8) names.  Drop
+;; the unrepresentable entries there so the fixture still exercises
+;; everything else.
 (defconst fz-fuzz-names
-  (if (eq system-type 'windows-nt)
-      (seq-filter (lambda (n)
-                    (and (multibyte-string-p n)
-                         (not (string-match-p "[\"\\\\*]" n))))
-                  fz-fuzz-names)
-    fz-fuzz-names))
+  (seq-filter (lambda (n)
+                (and (or (not (eq system-type 'windows-nt))
+                         (not (string-match-p "[\"\\\\*]" n)))
+                     (or (not (memq system-type '(windows-nt darwin)))
+                         (multibyte-string-p n))))
+              fz-fuzz-names))
 (dolist (name fz-fuzz-names)
   (write-region "" nil (concat fz-fuzz-dir "/" name) nil 'silent))
 (write-region "" nil (concat fz-fuzz-dir "/sub/deep.c") nil 'silent)

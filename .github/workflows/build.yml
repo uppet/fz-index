@@ -66,7 +66,7 @@ jobs:
           # single-file download does not work; clone the repo.
           git clone --depth 1 https://github.com/purcell/package-lint \
             /tmp/package-lint
-          emacs -Q --batch -L /tmp/package-lint \
+          emacs -Q --batch -L /tmp/package-lint -l package-lint \
             -f package-lint-batch-and-exit fz-index.el
       - name: Run tests
         shell: bash
