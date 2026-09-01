@@ -16,6 +16,13 @@
      (fz-query HANDLE PATTERN LIMIT)  -> list of (RELATIVE-PATH . SCORE)
      (fz-index-destroy HANDLE)        -> nil
 
+   Error contract: hard failures (bad argument types, allocation
+   failure, an unreadable root, a failed scan) signal a Lisp error.
+   The values nil (and -1 from `fz-index-count' on a still-building
+   index) are reserved for expected outcomes: an index that is not
+   ready, a query with no matches, or an unreadable/corrupt cache
+   file, and callers are expected to check for them.
+
    This file is part of an independent project; it is NOT a contribution
    to GNU Emacs.  It only uses the public module ABI in emacs-module.h.
 */
@@ -1329,6 +1336,23 @@ wrap_index (emacs_env *env, fz_index *ix)
   return env->make_user_ptr (env, fz_index_finalizer, ix);
 }
 
+/* Signal a Lisp `error' carrying MSG.  All hard failures in the
+   module API do this; `nil' (or -1 for `fz-index-count' on a still
+   building index) is reserved for expected outcomes such as an index
+   that is not ready, a query with no matches, or an unreadable cache
+   file.  */
+static void
+fz_signal_error (emacs_env *env, const char *msg)
+{
+  emacs_value sym = env->intern (env, "error");
+  emacs_value args = env->funcall (env, env->intern (env, "list"), 1,
+                                   (emacs_value[]) {
+                                     env->make_string (env, msg,
+                                                       strlen (msg))
+                                   });
+  env->non_local_exit_signal (env, sym, args);
+}
+
 /* Background scan entry point: never touches the Emacs API; finishing
    is announced through the pipe channel, which is the one module
    facility usable from arbitrary threads.  */
@@ -1365,11 +1389,16 @@ Ffz_index_build (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 {
   (void) data;
   ptrdiff_t len = 0;
+  /* A non-string ROOT makes copy_string_contents signal
+     wrong-type-argument itself; just propagate it.  */
   if (!env->copy_string_contents (env, args[0], NULL, &len))
-    return env->make_integer (env, -1);
+    return env->intern (env, "nil");
   char *root = malloc (len);
   if (!root)
-    return env->make_integer (env, -1);
+    {
+      fz_signal_error (env, "fz-index-build: out of memory");
+      return env->intern (env, "nil");
+    }
   env->copy_string_contents (env, args[0], root, &len);
   /* Strip a trailing slash, if any.  */
   if (len > 2 && root[len - 2] == '/')
@@ -1379,7 +1408,8 @@ Ffz_index_build (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
   if (!ix)
     {
       free (root);
-      return env->make_integer (env, -1);
+      fz_signal_error (env, "fz-index-build: out of memory");
+      return env->intern (env, "nil");
     }
   fz_index_init (ix);
   ix->root = root;
@@ -1396,9 +1426,9 @@ Ffz_index_build (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
       if (ix->pipe_fd < 0)
         {
           fz_index_free (ix);
-          env->non_local_exit_signal (env, env->intern (env, "error"),
-                                      env->make_integer (env, 0));
-          return env->make_integer (env, -1);
+          fz_signal_error (env,
+                           "fz-index-build: could not open the notify channel");
+          return env->intern (env, "nil");
         }
     }
 
@@ -1412,9 +1442,8 @@ Ffz_index_build (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
       if (fz_run_scan (ix) != 0)
         {
           fz_index_free (ix);
-          env->non_local_exit_signal (env, env->intern (env, "error"),
-                                      env->make_integer (env, 0));
-          return env->make_integer (env, -1);
+          fz_signal_error (env, "fz-index-build: could not scan the root");
+          return env->intern (env, "nil");
         }
       atomic_store (&ix->state, FZ_READY);
       if (ix->pipe_fd >= 0)
@@ -1474,7 +1503,10 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
     return env->intern (env, "nil");
   char *pattern = malloc (plen);
   if (!pattern)
-    return env->intern (env, "nil");
+    {
+      fz_signal_error (env, "fz-query: out of memory");
+      return env->intern (env, "nil");
+    }
   env->copy_string_contents (env, args[1], pattern, &plen);
 
   intmax_t limit = env->extract_integer (env, args[2]);
@@ -1498,6 +1530,7 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
       if (!pat_lower)
         {
           free (pattern);
+          fz_signal_error (env, "fz-query: out of memory");
           return env->intern (env, "nil");
         }
       for (ptrdiff_t i = 0; i < plen - 1; i++)
@@ -1541,6 +1574,7 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
       free (pattern);
       if (pat_lower != pattern)
         free (pat_lower);
+      fz_signal_error (env, "fz-query: out of memory");
       return env->intern (env, "nil");
     }
   memcpy (words_buf, pat_lower, plen);
@@ -1606,6 +1640,7 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
           free (pattern);
           if (pat_lower != pattern)
             free (pat_lower);
+          fz_signal_error (env, "fz-query: out of memory");
           return env->intern (env, "nil");
         }
     }
@@ -1664,6 +1699,7 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
       free (pattern);
       if (pat_lower != pattern)
         free (pat_lower);
+      fz_signal_error (env, "fz-query: out of memory");
       return env->intern (env, "nil");
     }
   size_t nhits = 0;
@@ -1953,7 +1989,8 @@ emacs_module_init (struct emacs_runtime *runtime)
          "NOTIFY-PROCESS is a pipe process created with\n"
          "`make-pipe-process', it receives output when the scan\n"
          "finishes.  NO-GITIGNORE non-nil disables .gitignore\n"
-         "filtering.");
+         "filtering.  Signals an error on an unusable ROOT, an\n"
+         "unreadable root directory, or allocation failure.");
   defun (env, "fz-index-count", 1, 1, Ffz_index_count,
          "Return the number of file paths in index HANDLE.\n"
          "Return -1 while the index is still being built.");
