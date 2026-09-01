@@ -1763,6 +1763,7 @@ Ffz_index_destroy (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
 /* Sanity limits guarding against corrupted cache files.  */
 #define FZ_CACHE_MAX_COUNT (1u << 26)
 #define FZ_CACHE_MAX_PATH 65535
+#define FZ_CACHE_MAX_FILE_SIZE ((size_t) 1 << 30) /* 1 GiB */
 
 /* (fz-index-save HANDLE PATH) */
 static emacs_value
@@ -1836,54 +1837,80 @@ Ffz_index_load (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
   free (path);
   if (!f)
     goto fail;
+  /* Read the whole file into memory in one fread, then parse from
+     the buffer: per-entry fread calls would be hundreds of thousands
+     of syscalls on a large index.  The file size is bounded by the
+     sanity limit, so the allocation is bounded too.  */
+  fseek (f, 0, SEEK_END);
+  long fsize = ftell (f);
+  fseek (f, 0, SEEK_SET);
+  if (fsize < 0 || (size_t) fsize > FZ_CACHE_MAX_FILE_SIZE)
+    goto fail_close;
+  unsigned char *buf = malloc ((size_t) fsize ? (size_t) fsize : 1);
+  if (!buf)
+    goto fail_close;
+  size_t got = fread (buf, 1, (size_t) fsize, f);
+  fclose (f);
+  f = NULL;                     /* avoid a second fclose on error paths */
+  if (got != (size_t) fsize)
+    {
+      free (buf);
+      goto fail;
+    }
   {
-    char magic[FZ_CACHE_MAGIC_LEN];
+    const unsigned char *p = buf;
+    const unsigned char *end = buf + got;
+    if ((size_t) (end - p) < FZ_CACHE_MAGIC_LEN
+        || memcmp (p, FZ_CACHE_MAGIC, FZ_CACHE_MAGIC_LEN) != 0)
+      goto fail_data;
+    p += FZ_CACHE_MAGIC_LEN;
     uint32_t count, rlen;
-    if (fread (magic, 1, FZ_CACHE_MAGIC_LEN, f) != FZ_CACHE_MAGIC_LEN
-        || memcmp (magic, FZ_CACHE_MAGIC, FZ_CACHE_MAGIC_LEN) != 0
-        || fread (&count, sizeof count, 1, f) != 1
-        || count > FZ_CACHE_MAX_COUNT
-        || fread (&rlen, sizeof rlen, 1, f) != 1)
-      goto fail_close;
+    if ((size_t) (end - p) < sizeof count)
+      goto fail_data;
+    memcpy (&count, p, sizeof count);
+    p += sizeof count;
+    if (count > FZ_CACHE_MAX_COUNT)
+      goto fail_data;
+    if ((size_t) (end - p) < sizeof rlen)
+      goto fail_data;
+    memcpy (&rlen, p, sizeof rlen);
+    p += sizeof rlen;
     /* The cache file name already identifies the root; the stored
        root is informational only.  */
-    if (rlen > 0)
-      {
-        char scratch[256];
-        size_t left = rlen;
-        while (left > 0)
-          {
-            size_t chunk = left < sizeof scratch ? left : sizeof scratch;
-            if (fread (scratch, 1, chunk, f) != chunk)
-              goto fail_close;
-            left -= chunk;
-          }
-      }
+    if ((size_t) (end - p) < rlen)
+      goto fail_data;
+    p += rlen;
     ix = malloc (sizeof *ix);
     if (!ix)
-      goto fail_close;
+      goto fail_data;
     fz_index_init (ix);
     ix->root = root;
     for (uint32_t i = 0; i < count; i++)
       {
         uint32_t pl;
-        char buf[FZ_CACHE_MAX_PATH];
-        if (fread (&pl, sizeof pl, 1, f) != 1 || pl > FZ_CACHE_MAX_PATH
-            || fread (buf, 1, pl, f) != pl)
-          goto fail_close;
+        if ((size_t) (end - p) < sizeof pl)
+          goto fail_data;
+        memcpy (&pl, p, sizeof pl);
+        p += sizeof pl;
+        if (pl > FZ_CACHE_MAX_PATH || (size_t) (end - p) < pl)
+          goto fail_data;
         /* Skip entries that are not valid UTF-8 (e.g. written by an
            older version), the same way the scanner skips them.  */
-        if (fz_utf8_valid (buf, pl)
-            && fz_index_add (ix, buf, pl) != 0)
-          goto fail_close;
+        if (fz_utf8_valid ((const char *) p, pl)
+            && fz_index_add (ix, (const char *) p, pl) != 0)
+          goto fail_data;
+        p += pl;
       }
-    fclose (f);
+    free (buf);
     fz_index_shrink (ix);
     atomic_store (&ix->state, FZ_READY);
     return wrap_index (env, ix);
   }
+fail_data:
+  free (buf);
 fail_close:
-  fclose (f);
+  if (f)
+    fclose (f);
 fail:
   free (root);
   if (ix)
