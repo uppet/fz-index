@@ -186,6 +186,53 @@ fz_index_add (fz_index *ix, const char *data, size_t len)
   return 0;
 }
 
+/* Shrink the arenas and index arrays to their exact used sizes.
+   During a scan or cache load the arrays grow by doubling, so a
+   completed index can hold up to ~2x the bytes it needs; call this
+   once the index is complete (it is immutable afterwards) to drop
+   the slack.  A failed realloc keeps the larger allocation, which is
+   still correct.  */
+static void
+fz_index_shrink (fz_index *ix)
+{
+  if (ix->count == 0)
+    {
+      free (ix->offs);
+      free (ix->lens);
+      ix->offs = NULL;
+      ix->lens = NULL;
+      ix->cap = 0;
+    }
+  else if (ix->count < ix->cap)
+    {
+      uint32_t *no = realloc (ix->offs, ix->count * sizeof *ix->offs);
+      uint32_t *nl = realloc (ix->lens, ix->count * sizeof *ix->lens);
+      if (no)
+        ix->offs = no;
+      if (nl)
+        ix->lens = nl;
+      ix->cap = ix->count;
+    }
+  if (ix->paths_len == 0)
+    {
+      free (ix->paths);
+      free (ix->lower);
+      ix->paths = NULL;
+      ix->lower = NULL;
+      ix->paths_cap = 0;
+    }
+  else if (ix->paths_len < ix->paths_cap)
+    {
+      char *np = realloc (ix->paths, ix->paths_len);
+      char *nl = realloc (ix->lower, ix->lower_len);
+      if (np)
+        ix->paths = np;
+      if (nl)
+        ix->lower = nl;
+      ix->paths_cap = ix->paths_len;
+    }
+}
+
 /* Minimal UTF-8 validation: the module API can only hand valid UTF-8
    to Lisp strings, so paths containing invalid bytes cannot be
    represented and are skipped instead.  */
@@ -833,6 +880,8 @@ fz_run_scan (fz_index *ix)
   free (sc.queue.v);
   pthread_cond_destroy (&sc.cv);
   pthread_mutex_destroy (&sc.mu);
+  if (sc.rc == 0)
+    fz_index_shrink (ix);
   return sc.rc;
 }
 
@@ -1829,6 +1878,7 @@ Ffz_index_load (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
           goto fail_close;
       }
     fclose (f);
+    fz_index_shrink (ix);
     atomic_store (&ix->state, FZ_READY);
     return wrap_index (env, ix);
   }
