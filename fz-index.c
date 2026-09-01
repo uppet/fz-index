@@ -88,12 +88,16 @@ typedef struct
 
   /* Incremental narrowing cache: when a query's pattern extends the
      previous one (prefix), only the previous match set is rescored.
-     Touched only from the Lisp thread, so no locking is needed.  */
+     NARROW_MU guards the whole read-score-refresh cycle: Emacs Lisp
+     threads are cooperative (one OS thread) today, but the module
+     must not rely on that assumption, and a concurrent entry would
+     otherwise race on LAST_HITS (realloc'd on refresh).  */
   char *last_pat;        /* pattern of the previous query */
   bool last_case_insens;
   uint32_t *last_hits;   /* indices of entries that matched last_pat */
   size_t last_nhits;
   size_t last_hits_cap;
+  pthread_mutex_t narrow_mu;
 
   /* Asynchronous build: the scan runs on WORKER, which only touches
      this struct and, at the end, writes one byte to PIPE_FD (a channel
@@ -121,6 +125,7 @@ fz_index_init (fz_index *ix)
   atomic_init (&ix->state, FZ_BUILDING);
   atomic_init (&ix->cancel, 0);
   pthread_mutex_init (&ix->add_mu, NULL);
+  pthread_mutex_init (&ix->narrow_mu, NULL);
 }
 
 static void
@@ -134,6 +139,7 @@ fz_index_free (fz_index *ix)
   if (ix->pipe_fd >= 0)
     close (ix->pipe_fd);
   pthread_mutex_destroy (&ix->add_mu);
+  pthread_mutex_destroy (&ix->narrow_mu);
   free (ix->paths);
   free (ix->lower);
   free (ix->offs);
@@ -1486,9 +1492,10 @@ Ffz_index_ready_p (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
                       atomic_load (&ix->state) == FZ_READY ? "t" : "nil");
 }
 
-/* (fz-query HANDLE PATTERN LIMIT) */
+/* Query implementation; the caller holds IX->narrow_mu.  */
 static emacs_value
-Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
+fz_query_impl (emacs_env *env, ptrdiff_t nargs, emacs_value *args,
+               void *data)
 {
   (void) nargs;
   (void) data;
@@ -1765,6 +1772,24 @@ Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
   free (pattern);
   if (pat_lower != pattern)
     free (pat_lower);
+  return result;
+}
+
+/* (fz-query HANDLE PATTERN LIMIT) */
+static emacs_value
+Ffz_query (emacs_env *env, ptrdiff_t nargs, emacs_value *args, void *data)
+{
+  fz_index *ix = get_index (env, args[0]);
+  if (!ix)
+    return env->intern (env, "nil");
+  if (atomic_load (&ix->state) != FZ_READY)
+    return env->intern (env, "nil");
+  /* Serialize the whole query: the implementation reads the
+     narrowing cache, scores against it, then refreshes it, and
+     another Lisp thread could call `fz-query' meanwhile.  */
+  pthread_mutex_lock (&ix->narrow_mu);
+  emacs_value result = fz_query_impl (env, nargs, args, data);
+  pthread_mutex_unlock (&ix->narrow_mu);
   return result;
 }
 
