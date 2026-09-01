@@ -7,9 +7,12 @@
 (write-region "" nil "/tmp/fz-persist/sub/beta.c" nil 'silent)
 
 ;; --- C level: save then load yields an identical, ready index.
-(let ((h (fz-index-build "/tmp/fz-persist/")))
-  (while (not (fz-index-ready-p h))
+(let ((h (fz-index-build "/tmp/fz-persist/"))
+      (deadline (+ (float-time) 30)))
+  (while (and (not (fz-index-ready-p h)) (< (float-time) deadline))
     (sleep-for 0.005))
+  (unless (fz-index-ready-p h)
+    (error "BUG: fz-persist index never became ready"))
   (unless (fz-index-save h "/tmp/fz-persist.cache")
     (error "BUG: fz-index-save failed"))
   (let ((h2 (fz-index-load "/tmp/fz-persist.cache" "/tmp/fz-persist/")))
@@ -40,8 +43,10 @@
   (clrhash fz-index--indexes)
   ;; First build: no cache yet.
   (let ((h (fz-index--index-for "/tmp/fz-persist/")))
-    (while (not (fz-index-ready-p h))
-      (accept-process-output nil 0.05)))
+    (while (and (not (fz-index-ready-p h)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (unless (fz-index-ready-p h)
+      (error "BUG: index-for build never became ready")))
   ;; Let the pipe filter run (it saves the cache).
   (while (and (not (file-exists-p "/tmp/fz-uem/fz-index/"))
               (< (float-time) deadline))

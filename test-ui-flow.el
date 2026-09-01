@@ -42,9 +42,12 @@
 (write-region "" nil (concat fz-flow-root "backup.c") nil 'silent)
 (write-region "" nil (concat fz-flow-root "sub/backup-extra.c") nil 'silent)
 (write-region "" nil (concat fz-flow-root "other.c") nil 'silent)
-(let ((h (fz-index-build fz-flow-root)))
-  (while (not (fz-index-ready-p h))
+(let ((h (fz-index-build fz-flow-root))
+      (deadline (+ (float-time) 30)))
+  (while (and (not (fz-index-ready-p h)) (< (float-time) deadline))
     (sleep-for 0.005))
+  (unless (fz-index-ready-p h)
+    (error "BUG: flow index never became ready"))
   (puthash fz-flow-root h fz-index--indexes))
 
 ;; RET opens the first candidate; C-n RET opens the second; both must

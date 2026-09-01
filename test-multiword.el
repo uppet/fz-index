@@ -9,9 +9,12 @@
              "tests/emacs-tests.el" "src/canvas.c"))
   (write-region "" nil (concat "/tmp/fz-mw/" f) nil 'silent))
 
-(let ((h (fz-index-build "/tmp/fz-mw/")))
-  (while (not (fz-index-ready-p h))
+(let ((h (fz-index-build "/tmp/fz-mw/"))
+      (deadline (+ (float-time) 30)))
+  (while (and (not (fz-index-ready-p h)) (< (float-time) deadline))
     (sleep-for 0.005))
+  (unless (fz-index-ready-p h)
+    (error "BUG: fz-mw index never became ready"))
   (cl-flet ((top1 (q) (caar (fz-query h q 5)))
             (hits (q) (mapcar #'car (fz-query h q 20))))
     ;; Both words must match; best alignment wins.

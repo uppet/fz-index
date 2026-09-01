@@ -8,9 +8,12 @@
 (write-region "" nil "/tmp/fz-hl/src/emacs.c" nil 'silent)
 (write-region "" nil "/tmp/fz-hl/中文目录/笔记.c" nil 'silent)
 
-(let ((h (fz-index-build "/tmp/fz-hl/")))
-  (while (not (fz-index-ready-p h))
+(let ((h (fz-index-build "/tmp/fz-hl/"))
+      (deadline (+ (float-time) 30)))
+  (while (and (not (fz-index-ready-p h)) (< (float-time) deadline))
     (sleep-for 0.005))
+  (unless (fz-index-ready-p h)
+    (error "BUG: fz-hl index never became ready"))
   ;; Positions identify the matched bytes of the query.
   (let* ((hit (car (fz-query h "emacs.c" 1)))
          (pos (caddr hit)))
