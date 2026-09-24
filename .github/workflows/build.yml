@@ -36,7 +36,7 @@ jobs:
       - name: Build the module (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
-        run: make fz-index.dll
+        run: make fz-index-core.dll
       - name: Build the module
         if: runner.os != 'Windows'
         run: make
@@ -77,7 +77,8 @@ jobs:
                    test-ui-flow.el test-multiword.el test-persist.el \
                    test-refresh.el test-symlink.el test-root.el \
                    test-highlight.el test-completion-table.el \
-                   test-module-install.el test-fuzz.el; do
+                   test-autoload-shadow.el test-module-install.el \
+                   test-fuzz.el; do
             echo "== $t"
             emacs -Q --batch -L . -l "$t"
           done
@@ -112,7 +113,7 @@ jobs:
         run: >
           gcc -O1 -g -fsanitize=address,undefined
           -fno-omit-frame-pointer -std=c99 -fPIC -shared
-          -o fz-index.so fz-index.c -lpthread
+          -o fz-index-core.so fz-index.c -lpthread
       - name: Scanner ASan stress (symlink loop + cancel)
         run: |
           gcc -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
@@ -130,7 +131,8 @@ jobs:
                    test-ui-flow.el test-multiword.el test-persist.el \
                    test-refresh.el test-symlink.el test-root.el \
                    test-highlight.el test-completion-table.el \
-                   test-module-install.el test-fuzz.el; do
+                   test-autoload-shadow.el test-module-install.el \
+                   test-fuzz.el; do
             echo "== $t"
             emacs -Q --batch -L . -l "$t"
           done
@@ -151,7 +153,7 @@ jobs:
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
-        run: make fz-index.dll
+        run: make fz-index-core.dll
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: make
@@ -161,10 +163,10 @@ jobs:
           # Cross-compile both arches on the arm64 runner: the Intel
           # runner pool (macos-13) is being retired and queues forever.
           make CFLAGS="-O2 -Wall -Wextra -std=c99 -fPIC -arch arm64"
-          mv fz-index.dylib fz-index-aarch64-macos.dylib
+          mv fz-index-core.dylib fz-index-core-aarch64-macos.dylib
           make clean
           make CFLAGS="-O2 -Wall -Wextra -std=c99 -fPIC -arch x86_64"
-          mv fz-index.dylib fz-index-x86_64-macos.dylib
+          mv fz-index-core.dylib fz-index-core-x86_64-macos.dylib
       - name: Stage assets
         shell: bash
         run: |
@@ -172,22 +174,22 @@ jobs:
           case "${{ runner.os }}" in
             Linux)
               case "$(uname -m)" in
-                x86_64)  cp fz-index.so fz-index-x86_64-linux-gnu.so ;;
-                aarch64) cp fz-index.so fz-index-aarch64-linux-gnu.so ;;
+                x86_64)  cp fz-index-core.so fz-index-core-x86_64-linux-gnu.so ;;
+                aarch64) cp fz-index-core.so fz-index-core-aarch64-linux-gnu.so ;;
                 *) echo "unexpected arch $(uname -m)"; exit 1 ;;
               esac ;;
-            Windows) cp fz-index.dll fz-index-x86_64-windows.dll ;;
+            Windows) cp fz-index-core.dll fz-index-core-x86_64-windows.dll ;;
             macOS)   : ;;  # named by the build step already
           esac
-          assets=(fz-index-x86_64-* fz-index-aarch64-*)
+          assets=(fz-index-core-x86_64-* fz-index-core-aarch64-*)
           [ ${#assets[@]} -gt 0 ] || { echo "no staged assets"; exit 1; }
           ls -l "${assets[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: module-${{ matrix.os }}
           path: |
-            fz-index-x86_64-*
-            fz-index-aarch64-*
+            fz-index-core-x86_64-*
+            fz-index-core-aarch64-*
           if-no-files-found: error
 
   release:
@@ -202,9 +204,9 @@ jobs:
           pattern: module-*
           merge-multiple: true
       - name: Checksums
-        run: sha256sum fz-index-* > checksums.txt && cat checksums.txt
+        run: sha256sum fz-index-core-* > checksums.txt && cat checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            fz-index-*
+            fz-index-core-*
             checksums.txt

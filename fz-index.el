@@ -44,14 +44,14 @@
 (require 'seq)
 (require 'subr-x)
 
-;; Provided by the fz-index dynamic module (fz-index.so).
-(declare-function fz-index-build "fz-index")
-(declare-function fz-index-count "fz-index")
-(declare-function fz-index-destroy "fz-index")
-(declare-function fz-index-load "fz-index")
-(declare-function fz-index-ready-p "fz-index")
-(declare-function fz-index-save "fz-index")
-(declare-function fz-query "fz-index")
+;; Provided by the fz-index dynamic module (fz-index-core.so).
+(declare-function fz-index-build "fz-index-core")
+(declare-function fz-index-count "fz-index-core")
+(declare-function fz-index-destroy "fz-index-core")
+(declare-function fz-index-load "fz-index-core")
+(declare-function fz-index-ready-p "fz-index-core")
+(declare-function fz-index-save "fz-index-core")
+(declare-function fz-query "fz-index-core")
 
 (defgroup fz-index nil
   "Fast fuzzy file open backed by a native index."
@@ -66,6 +66,20 @@ Prebuilt modules are published under the GitHub release tagged
   (file-name-directory (or load-file-name buffer-file-name
                            default-directory))
   "Directory containing fz-index.el, the C sources and the module.")
+
+;; Up to 0.3.1 the module file shared this library's basename
+;; ("fz-index.so" next to "fz-index.el"), and since `load-suffixes'
+;; puts the module suffix first, that binary shadowed fz-index.el on
+;; every autoload and on (require 'fz-index).  The module is now named
+;; fz-index-core; remove the stale file when the package is activated.
+;; This cookie is copied into the package autoloads file, so it runs
+;; before any autoloaded entry point can trip over the old binary
+;; (in-place upgrades, e.g. package-vc, keep the old download).
+;;;###autoload
+(when (and (boundp 'module-file-suffix) module-file-suffix)
+  (let ((stale (locate-library (concat "fz-index" module-file-suffix) t)))
+    (when stale
+      (ignore-errors (delete-file stale)))))
 
 (defcustom fz-index-module-auto-install t
   "When non-nil, a missing fz-index module is installed automatically.
@@ -925,10 +939,13 @@ PROMPT, when given, replaces the default prompt."
 ;;; Module loading
 
 (defun fz-index--module-file ()
-  "Return the module file name for this Emacs, next to fz-index.el."
+  "Return the module file name for this Emacs, next to fz-index.el.
+The basename differs from fz-index.el's on purpose: `load-suffixes'
+puts the module suffix first, so a module named \"fz-index\" would
+shadow the library on every autoload."
   (and (boundp 'module-file-suffix)
        module-file-suffix
-       (expand-file-name (concat "fz-index" module-file-suffix)
+       (expand-file-name (concat "fz-index-core" module-file-suffix)
                          fz-index--directory)))
 
 (defun fz-index--platform ()
@@ -1044,7 +1061,7 @@ asset (the caller should compile instead)."
   (when-let* ((platform (fz-index--platform))
               (base (format "https://github.com/uppet/fz-index/releases/download/v%s"
                             fz-index-version))
-              (name (format "fz-index-%s%s" platform module-file-suffix)))
+              (name (format "fz-index-core-%s%s" platform module-file-suffix)))
     (let* ((bin (fz-index--fetch (concat base "/" name)
                                  (format "fz-index: downloading %s" name)))
            ;; Skip the checksum fetch entirely when the binary fetch

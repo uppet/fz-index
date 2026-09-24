@@ -57,16 +57,16 @@ release.  See [[*Security and trust model]] for the full picture and
 how to opt out.
 
 Run =M-x fz-index-ensure-module= to install ahead of time, or build
-by hand with =make= (=make fz-index.dll= cross-compiles for Windows
-with =gcc-mingw-w64-x86-64=; the same source also builds natively
-under MSYS2).
+by hand with =make= (=make fz-index-core.dll= cross-compiles for
+Windows with =gcc-mingw-w64-x86-64=; the same source also builds
+natively under MSYS2).
 
 ** Security and trust model
 
 Using =fz-index= loads native code into your Emacs process, so the
 trust question is worth stating plainly.
 
-1. *Prebuilt binaries.*  The =fz-index.so= / =.dylib= / =.dll=
+1. *Prebuilt binaries.*  The =fz-index-core.so= / =.dylib= / =.dll=
    downloaded from GitHub Releases is built by this project's CI
    (GitHub Actions) from the committed =fz-index.c=, and verified
    against the SHA-256 in =checksums.txt= published with the same
@@ -81,7 +81,7 @@ trust question is worth stating plainly.
 
 To avoid the automatic download entirely, set
 =fz-index-module-auto-install= to nil and build the module yourself
-with =make= (or =make fz-index.dll= on Windows);
+with =make= (or =make fz-index-core.dll= on Windows);
 =fz-index-ensure-module= then only loads a module you placed next
 to =fz-index.el=.
 

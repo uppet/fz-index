@@ -20,7 +20,7 @@
 
 (require 'subr-x)
 
-(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
+(module-load (expand-file-name (concat "fz-index-core" module-file-suffix)))
 
 (defconst bench-root
   (or (car command-line-args-left)

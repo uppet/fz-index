@@ -6,7 +6,7 @@
 (require 'ert)
 
 (module-load (expand-file-name
-              (concat "fz-index" module-file-suffix)
+              (concat "fz-index-core" module-file-suffix)
               (file-name-directory (or load-file-name buffer-file-name))))
 
 (defvar fz-index-test-dir nil)

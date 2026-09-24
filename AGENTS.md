@@ -32,8 +32,10 @@ the surrounding style.
   requirement); internal symbols use `fz-index--`.
 - `emacs-module.h` — vendored module header; the build needs nothing
   else from Emacs.
-- `Makefile` — `make` (Linux .so / macOS .dylib), `make fz-index.dll`
-  (Windows via mingw-w64 cross or MSYS2 native).
+- `Makefile` — `make` (Linux .so / macOS .dylib), `make
+  fz-index-core.dll` (Windows via mingw-w64 cross or MSYS2 native).
+  The module's basename is `fz-index-core`, deliberately different
+  from `fz-index.el` (see the hard-won facts below).
 - `fz-index-tests.el` — ERT unit tests for the module API (run with
   `ert-run-tests-batch-and-exit`).  `test-*.el` — batch
   integration/performance scripts (NOT ert); each exits non-zero on
@@ -47,13 +49,13 @@ the surrounding style.
 ## Build and test
 
 ```sh
-make                 # produces fz-index.so (or .dylib on macOS)
+make                 # produces fz-index-core.so (or .dylib on macOS)
 emacs -Q --batch --eval '(byte-compile-file "fz-index.el")'
 emacs -Q --batch -L . -l fz-index-tests.el -f ert-run-tests-batch-and-exit
 for t in test-m3.el test-m4.el test-open.el test-ui-fix.el test-ui-flow.el \
          test-multiword.el test-persist.el test-refresh.el test-symlink.el \
          test-root.el test-highlight.el test-completion-table.el \
-         test-module-install.el test-fuzz.el; do
+         test-autoload-shadow.el test-module-install.el test-fuzz.el; do
   emacs -Q --batch -L . -l "$t" || exit 1
 done
 ```
@@ -147,6 +149,18 @@ show up locally.  Therefore:
   suspicious of any background-thread I/O in tests.
 - Module file suffix comes from `module-file-suffix` at runtime
   (.so / .dylib / .dll); never hard-code it.
+- The module file must NOT share the library's basename:
+  `load-suffixes` puts the module suffix before .elc/.el, so a
+  `fz-index.so` next to `fz-index.el` is what `load "fz-index"`
+  picks — every autoload then fails with "Autoloading file ...
+  failed to define function", and `(require 'fz-index)` silently
+  loads only the C layer if the module also provides that feature
+  (the module therefore provides `fz-index-core`).  Hence
+  `fz-index-core<suffix>`, and the `;;;###autoload` cookie at the
+  top of `fz-index.el` that deletes a stale `fz-index<suffix>`
+  left behind by pre-rename installs (in-place upgrades keep the
+  old download; the cookie runs at activation, before any autoload
+  can hit it).  `test-autoload-shadow.el` covers all of this.
 - The results buffer is read-only and line-indexed: candidate N is
   on line N+1.  If you change rendering (headers, grouping), update
   `fz-index--results-click`/`fz-index--results-open` accordingly.
@@ -156,12 +170,12 @@ show up locally.  Therefore:
 1. Bump BOTH `;; Version:` and `fz-index-version` in `fz-index.el`
    (CI rejects tags that don't match the header).
 2. Commit, tag `vX.Y.Z`, push the tag.
-3. CI builds `fz-index-<platform><suffix>` for
+3. CI builds `fz-index-core-<platform><suffix>` for
    x86_64-linux-gnu, aarch64-linux-gnu, x86_64-macos, aarch64-macos,
    x86_64-windows, generates `checksums.txt`, and attaches all of
    them to the GitHub release.
 4. `fz-index-ensure-module` downloads
-   `releases/download/v<fz-index-version>/fz-index-<platform><suffix>`
+   `releases/download/v<fz-index-version>/fz-index-core-<platform><suffix>`
    and verifies it against `checksums.txt`, so the Version bump and
    the tag MUST stay in sync.
 

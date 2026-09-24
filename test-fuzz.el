@@ -1,5 +1,5 @@
 ;;; Fuzz the module with pathological file names and queries. -*- lexical-binding: t; -*-
-(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
+(module-load (expand-file-name (concat "fz-index-core" module-file-suffix)))
 
 (defconst fz-fuzz-dir "/tmp/fz-fuzz")
 

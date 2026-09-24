@@ -2051,7 +2051,10 @@ emacs_module_init (struct emacs_runtime *runtime)
          "Return a ready handle, or nil if the file is missing or\n"
          "corrupt.");
 
-  emacs_value feat = env->intern (env, "fz-index");
+  /* The feature matches the module's file name (fz-index-core), not
+     the library's: providing "fz-index" would let (require 'fz-index)
+     succeed with only the C layer loaded.  */
+  emacs_value feat = env->intern (env, "fz-index-core");
   env->funcall (env, env->intern (env, "provide"), 1,
                 (emacs_value[]) { feat });
   return 0;

@@ -1,7 +1,7 @@
 ;;; Symlink handling in the scanner.  -*- lexical-binding: t; -*-
 ;;; Directory links are not followed (a loop must not keep the scan
 ;;; growing); symlinked files are indexed.
-(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
+(module-load (expand-file-name (concat "fz-index-core" module-file-suffix)))
 
 ;; Windows usually requires a privilege to create symlinks, and the
 ;; scanner there degrades to following directory links anyway

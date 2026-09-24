@@ -1,6 +1,6 @@
 ;;; Module install / load-failure handling tests.  -*- lexical-binding: t; -*-
 (require 'cl-lib)
-(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
+(module-load (expand-file-name (concat "fz-index-core" module-file-suffix)))
 (load (expand-file-name "./fz-index.elc") nil t)
 
 ;; A file that fails module-load: deleted when auto-install is on
@@ -39,11 +39,11 @@
 (let ((dir (make-temp-file "fz-mod-" t)))
   (unwind-protect
       (let ((dest (expand-file-name
-                   (concat "fz-index" module-file-suffix) dir))
+                   (concat "fz-index-core" module-file-suffix) dir))
             (fz-index-version "0.0.0")
             (system-type 'gnu/linux)
             (system-configuration "x86_64-linux-gnu")
-            (name (concat "fz-index-x86_64-linux-gnu" module-file-suffix)))
+            (name (concat "fz-index-core-x86_64-linux-gnu" module-file-suffix)))
         ;; Platform without a prebuilt asset: nil, never a keyword.
         (let ((system-configuration "riscv64-linux-gnu"))
           (unless (null (fz-index--download-module dest))

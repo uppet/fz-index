@@ -1,5 +1,5 @@
 ;;; Test frecency re-sort (log2 + half-life decay) and persistence. -*- lexical-binding: t; -*-
-(module-load (expand-file-name (concat "fz-index" module-file-suffix)))
+(module-load (expand-file-name (concat "fz-index-core" module-file-suffix)))
 (load (expand-file-name "./fz-index.elc") nil t)
 
 (let ((fz-index--history (make-hash-table :test 'equal)))
