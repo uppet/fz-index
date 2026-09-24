@@ -5,7 +5,7 @@
 ;; Author: Joyer Huang <collger@gmail.com>
 ;; Assisted-by: Kimi Code CLI
 ;; Maintainer: Joyer Huang <collger@gmail.com>
-;; Version: 0.3.1
+;; Version: 0.3.2
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: files, matching, convenience
 ;; URL: https://github.com/uppet/fz-index
@@ -57,7 +57,7 @@
   "Fast fuzzy file open backed by a native index."
   :group 'convenience)
 
-(defconst fz-index-version "0.3.1"
+(defconst fz-index-version "0.3.2"
   "Version of the fz-index package.
 Prebuilt modules are published under the GitHub release tagged
 \"v\" concatenated with this version.")
@@ -1102,7 +1102,7 @@ asset (the caller should compile instead)."
   "Return a human-readable description of download failure REASON.
 REASON is a keyword returned by `fz-index--download-module'."
   (pcase reason
-    (:network "network error while contacting GitHub Releases")
+    (:network "network error while contacting GitHub Releases (or the release for this version does not carry this platform's module)")
     (:no-checksum "the release does not list this platform's module in checksums.txt")
     (:checksum-mismatch "the downloaded bytes do not match the published SHA-256 checksum")
     (:disk-mismatch "the module could not be written to disk intact (the on-disk bytes do not match the published checksum)")
