@@ -17,6 +17,8 @@ is needed in the common case.
 (global-set-key (kbd "C-c f") #'fz-index-open-file)
 #+end_src
 
+Update later with =M-x package-vc-upgrade RET fz-index RET=.
+
 ** use-package :vc (Emacs 30+)
 
 #+begin_src elisp
@@ -27,8 +29,10 @@ is needed in the common case.
 
 ** MELPA
 
-Not yet; the recipe is prepared in =melpa-recipe= and submission is
-planned.
+The recipe has been submitted and is pending review
+([[https://github.com/melpa/melpa/pull/10252][melpa/melpa#10252]]).
+Once merged, =M-x package-install RET fz-index RET= becomes the
+recommended way to install; until then, use package-vc above.
 
 ** Manual
 
@@ -40,7 +44,7 @@ planned.
 
 ** The native module
 
-=M-x fz-index-open-file= needs the =fz-index= dynamic module.  On first
+=M-x fz-index-open-file= needs the =fz-index-core= dynamic module.  On first
 use, =fz-index-ensure-module= installs it automatically
 (=fz-index-module-auto-install=, default t):
 
