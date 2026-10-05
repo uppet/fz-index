@@ -60,8 +60,9 @@ or re-encoded bytes) but is not a defense against a compromised
 release.  See [[*Security and trust model]] for the full picture and
 how to opt out.
 
-Run =M-x fz-index-ensure-module= to install ahead of time, or build
-by hand with =make= (=make fz-index-core.dll= cross-compiles for
+The install runs on first use; to run it ahead of time, load the
+library first and use =M-x fz-index-ensure-module=.  Or build by
+hand with =make= (=make fz-index-core.dll= cross-compiles for
 Windows with =gcc-mingw-w64-x86-64=; the same source also builds
 natively under MSYS2).
 

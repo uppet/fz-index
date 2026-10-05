@@ -127,6 +127,13 @@ show up locally.  Therefore:
 - Tests that drive `fz-index-open-file` must bind
   `user-emacs-directory` to a temp dir, otherwise the on-disk index
   cache leaks into the real `~/.emacs.d/fz-index/`.
+- Loading the package must not perform file I/O or add hooks (MELPA
+  review): the open history is loaded and the `kill-emacs-hook` save
+  armed lazily by `fz-index--ensure-history` on the first
+  `fz-index-open-file` / `fz-index-completion-table` call.  Tests
+  that drive those entry points must also set
+  `fz-index-history-file` to a temp path, or the lazy load reads the
+  developer's real history file mid-test.
 - The directory scan is multi-threaded (pool of ≤8 workers, shared
   LIFO queue in `fz_scan_ctx`).  All queue handoffs happen under
   `sc->mu`; `fz_index_add` is serialized under `ix->add_mu`;

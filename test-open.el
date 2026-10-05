@@ -10,6 +10,10 @@
 ;; Preview is debounced via an idle timer, which never fires in batch;
 ;; mock it to run immediately so the preview path stays covered.
 (require 'cl-lib)
+;; The history now loads lazily on the first search; point the file
+;; at a nonexistent temp path so that load is a no-op and the
+;; kill-emacs save cannot touch the real history file.
+(setq fz-index-history-file "/tmp/fz-open-uem/history.el")
 (let* ((root (file-name-as-directory (expand-file-name default-directory)))
        (abs (expand-file-name "fz-index.el" root))
        (fz-index--history (make-hash-table :test 'equal))
@@ -53,6 +57,30 @@
   (kill-buffer pbuf)
   (princ "preview->open->cleanup keeps the buffer\n"))
 
+;; fz-index--preview-now runs from an idle timer: a file-error from
+;; find-file-noselect (e.g. the file vanished or became unreadable
+;; between scan and preview) skips the preview with a message instead
+;; of surfacing as a timer error; other errors still propagate.
+(let ((fz-index--candidates (list (list "README.org" 0 nil)))
+      (fz-index--selected 0)
+      (fz-index--root (file-name-as-directory
+                       (expand-file-name default-directory)))
+      (fz-index--origin-window (selected-window))
+      (fz-index--preview-buffers nil)
+      (fz-index-preview-enabled t))
+  (cl-letf (((symbol-function 'find-file-noselect)
+             (lambda (&rest _) (signal 'file-error (list "boom")))))
+    (fz-index--preview-now)
+    (when fz-index--preview-buffers
+      (error "BUG: preview buffer kept after file-error")))
+  (cl-letf (((symbol-function 'find-file-noselect)
+             (lambda (&rest _) (signal 'error (list "boom")))))
+    (unless (condition-case nil
+                (progn (fz-index--preview-now) nil)
+              (error t))
+      (error "BUG: non-file preview error was swallowed")))
+  (princ "preview failure-path tests passed\n"))
+
 (princ "open tests done\n")
 
 ;; fz-index--results-open: RET in the results buffer selects the current
@@ -76,4 +104,6 @@
         (error "BUG: results-open moved selection on out-of-range line"))))
   (princ "results-open tests passed\n"))
 
+;; The temp dir is gone; disarm the exit-time history save.
+(remove-hook 'kill-emacs-hook #'fz-index--history-save)
 (delete-directory "/tmp/fz-open-uem" t)

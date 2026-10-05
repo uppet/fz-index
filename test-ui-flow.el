@@ -74,4 +74,6 @@
 (delete-directory (concat fz-flow-root "sub"))
 (delete-directory fz-flow-root)
 (princ "ui flow tests done\n")
+;; The temp dir is gone; disarm the exit-time history save.
+(remove-hook 'kill-emacs-hook #'fz-index--history-save)
 (delete-directory "/tmp/fz-flow-uem" t)

@@ -67,4 +67,44 @@
         (error "BUG: legacy migration: %S" y))
       (princ "legacy file migration OK\n")))
   (delete-file fz-index-history-file))
+
+;; fz-index--ensure-history: when the load fails (here the history
+;; file is a directory, which insert-file-contents cannot read), the
+;; error propagates, the loaded flag stays unset and the save hook
+;; unarmed, so the next search retries; with a readable file the
+;; retry loads it and arms the hook.  The history table, the loaded
+;; flag and kill-emacs-hook are let-bound, so the global state stays
+;; untouched; unwind-protect removes the temp path (a directory,
+;; later a file) even when an assertion fails.
+(let ((fz-index-history-file (make-temp-file "fz-hist-dir" t))
+      (fz-index--history (make-hash-table :test 'equal))
+      (fz-index--history-loaded nil)
+      (kill-emacs-hook nil))
+  (unwind-protect
+      (progn
+        (unless (condition-case nil
+                    (progn (fz-index--ensure-history) nil)
+                  (file-error t))
+          (error "BUG: unreadable history file did not signal file-error"))
+        (when fz-index--history-loaded
+          (error "BUG: loaded flag set despite the failed load"))
+        (when (member #'fz-index--history-save kill-emacs-hook)
+          (error "BUG: save hook armed despite the failed load"))
+        (delete-directory fz-index-history-file)
+        (with-temp-file fz-index-history-file
+          (prin1 (list (cons "/retry/a.c" (cons 4 (float-time))))
+                 (current-buffer)))
+        (fz-index--ensure-history)
+        (unless fz-index--history-loaded
+          (error "BUG: retry after a failed load did not set the flag"))
+        (unless (member #'fz-index--history-save kill-emacs-hook)
+          (error "BUG: retry after a failed load did not arm the save hook"))
+        (let ((e (fz-index--history-entry "/retry/a.c")))
+          (unless (and e (= (car e) 4))
+            (error "BUG: retry did not load the history: %S" e)))
+        (princ "ensure-history retry tests passed\n"))
+    (if (file-directory-p fz-index-history-file)
+        (delete-directory fz-index-history-file)
+      (when (file-exists-p fz-index-history-file)
+        (delete-file fz-index-history-file)))))
 (princ "M4 elisp tests done\n")

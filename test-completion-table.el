@@ -3,6 +3,11 @@
 (load (expand-file-name "./fz-index.elc") nil t)
 (require 'cl-lib)
 
+;; The open history loads lazily on the first search; point its file
+;; at a temp path before the first completion-table call, so the load
+;; cannot read (nor the kill-emacs save write) the real history file.
+(setq fz-index-history-file "/tmp/fz-ct-uem3/history.el")
+
 ;; One expanded root per fixture: on Windows expand-file-name maps
 ;; "/tmp" onto the current drive's \tmp, so a raw "/tmp/..." string
 ;; would not match the keys the code under test derives from the
@@ -82,10 +87,7 @@
 
 ;; History and frecency: empty input lists the open history and
 ;; recorded opens boost query results -- the same candidates
-;; `fz-index--update' shows in the main UI.  Point the history file
-;; at a temp path so the kill-emacs save hook does not touch the
-;; real one.
-(setq fz-index-history-file "/tmp/fz-ct-uem3/history.el")
+;; `fz-index--update' shows in the main UI.
 (clrhash fz-index--indexes)
 (clrhash fz-index--history)
 (let ((user-emacs-directory "/tmp/fz-ct-uem3/")
@@ -168,6 +170,8 @@
 (delete-file (concat fz-ct-root "src/main.c"))
 (delete-directory (concat fz-ct-root "src"))
 (delete-directory fz-ct-root)
+;; The temp dirs are gone; disarm the exit-time history save.
+(remove-hook 'kill-emacs-hook #'fz-index--history-save)
 (delete-directory "/tmp/fz-ct-uem" t)
 (delete-directory "/tmp/fz-ct-uem2" t)
 (delete-directory "/tmp/fz-ct-uem3" t)

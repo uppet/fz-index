@@ -79,7 +79,11 @@ Prebuilt modules are published under the GitHub release tagged
 (when (and (boundp 'module-file-suffix) module-file-suffix)
   (let ((stale (locate-library (concat "fz-index" module-file-suffix) t)))
     (when stale
-      (ignore-errors (delete-file stale)))))
+      ;; A read-only install tree makes the delete fail; leave the
+      ;; file rather than error out of package activation.
+      (condition-case nil
+          (delete-file stale)
+        (file-error nil)))))
 
 (defcustom fz-index-module-auto-install t
   "When non-nil, a missing fz-index module is installed automatically.
@@ -247,7 +251,13 @@ by a background rescan (stale-while-revalidate), so the first
   "Return a ready index handle from ROOT's cache file, or nil."
   (let ((file (fz-index--cache-file root)))
     (when (file-exists-p file)
-      (let ((h (ignore-errors (fz-index-load file root))))
+      ;; A corrupt or version-skewed cache file signals an error;
+      ;; fall back to the background rescan, which rewrites it.
+      (let ((h (condition-case err
+                   (fz-index-load file root)
+                 (error (message "fz-index: ignoring unreadable cache %s (%s)"
+                                 file (error-message-string err))
+                        nil))))
         (when h
           (message "fz-index: %s, %d files (cached; refreshing in background)"
                    root (fz-index-count h))
@@ -397,6 +407,7 @@ Rebuild happens on the next `fz-index-open-file'."
   "Fuzzy-find and open a file under the current project root."
   (interactive)
   (fz-index-ensure-module)
+  (fz-index--ensure-history)
   (let* ((root (fz-index--root))
          (origin-buffer (current-buffer))
          (fz-index--root root)
@@ -766,7 +777,15 @@ are migrated with the current time, i.e. they start undecayed."
     (with-temp-buffer
       (insert-file-contents fz-index-history-file)
       (goto-char (point-min))
-      (let ((entries (ignore-errors (read (current-buffer)))))
+      (let ((entries (condition-case err
+                         (read (current-buffer))
+                       ;; A truncated or corrupt history file: start
+                       ;; over with an empty history.
+                       (error
+                        (message "fz-index: ignoring unreadable history %s (%s)"
+                                 fz-index-history-file
+                                 (error-message-string err))
+                        nil))))
         (when (listp entries)
           (clrhash fz-index--history)
           (dolist (e entries)
@@ -779,8 +798,20 @@ are migrated with the current time, i.e. they start undecayed."
                  ((and (consp v) (integerp (car v)) (numberp (cdr v)))
                   (puthash (car e) v fz-index--history)))))))))))
 
-(add-hook 'kill-emacs-hook #'fz-index--history-save)
-(fz-index--history-load)
+(defvar fz-index--history-loaded nil
+  "Non-nil once the open history was loaded from disk.")
+
+(defun fz-index--ensure-history ()
+  "Load the open history and arm its `kill-emacs-hook' save, once.
+Called on the first search rather than at load time, so that merely
+loading the package performs no file I/O and adds no hooks.  The
+flag is set only after both steps succeeded: when the load signals
+an error (e.g. an unreadable history file), the next search
+retries."
+  (unless fz-index--history-loaded
+    (fz-index--history-load)
+    (add-hook 'kill-emacs-hook #'fz-index--history-save)
+    (setq fz-index--history-loaded t)))
 
 ;;; Preview
 
@@ -839,10 +870,21 @@ session ends (except one the user actually opened)."
                        ;; enable-local-variables switches nil keeps a
                        ;; risky file/dir-local-variables prompt from
                        ;; popping up inside this idle timer.
-                       (let ((b (let (enable-local-variables
-                                      enable-dir-local-variables)
-                                  (ignore-errors
-                                    (find-file-noselect abs)))))
+                       (let ((b (when (file-readable-p abs)
+                                  (let (enable-local-variables
+                                        enable-dir-local-variables)
+                                    ;; This runs from an idle timer:
+                                    ;; a file that cannot be read (or
+                                    ;; vanished between the scan and
+                                    ;; here) gets no preview, not a
+                                    ;; timer error.
+                                    (condition-case err
+                                        (find-file-noselect abs)
+                                      (file-error
+                                       (message
+                                        "fz-index: cannot preview %s (%s)"
+                                        abs (error-message-string err))
+                                       nil))))))
                          (when b
                            (push b fz-index--preview-buffers)
                            b)))))
@@ -884,6 +926,7 @@ sorted by the native index.  Use it with `completion-styles' bound
 to (fz-index) so the completion styles do not filter the candidates
 again.  While the index is still building, the table is empty."
   (fz-index-ensure-module)
+  (fz-index--ensure-history)
   (lambda (string _pred action)
     (cond
      ((eq action 'metadata)
@@ -1174,12 +1217,18 @@ off the file is left alone: it may be the user's own build."
          (progn
            (message "fz-index: loading %s failed (%s); deleting the file"
                     file (error-message-string err))
-           (ignore-errors (delete-file file)))
+           ;; A read-only install tree makes the delete fail; the
+           ;; reinstall then errors on the overwrite attempt instead.
+           (condition-case nil
+               (delete-file file)
+             (file-error nil)))
        (message "fz-index: loading %s failed (%s)"
                 file (error-message-string err)))
      nil)))
 
-;;;###autoload
+;; Not autoloaded: the autoloaded entry points call this themselves,
+;; and an interactive pre-install only makes sense once the package
+;; is loaded anyway.
 (defun fz-index-ensure-module ()
   "Load the fz-index dynamic module, installing it when missing.
 When the module file is absent and `fz-index-module-auto-install'
